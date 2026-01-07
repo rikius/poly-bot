@@ -1,6 +1,6 @@
 # Polymarket Bot - Complete Execution Plan
 
-## Current Status: Phase 7 Complete ✅
+## Current Status: Phase 7.5 Complete ✅
 
 **Latest Update:** 2026-01-07
 
@@ -14,8 +14,8 @@
 - ✅ **Phase 6:** Strategy Framework - Traits, router, executor, policies (94 tests passing)
 - ✅ **Event-Driven Refactor:** tokio::select! architecture, <1ms latency
 - ✅ **Phase 7:** Math arb strategy (MVP) - Market pair registry, edge calculator, MathArbStrategy (115 tests)
-- 🚧 **Phase 7.5:** API Fix & Market Discovery - NEXT (fix CLOB/Gamma API issues)
-- ⏸️ **Phase 8:** Maker rebate strategy
+- ✅ **Phase 7.5:** API Fix & Market Discovery - Fixed CLOB/Gamma API, slug-based 15-min crypto discovery (136 tests)
+- 🚧 **Phase 8:** Wire up execution policies (taker/maker) - IN PROGRESS
 - ⏸️ **Phase 9:** Integration and live testing
 - ⏸️ **Phase 10:** Monitoring and deployment
 
@@ -34,10 +34,14 @@
 - Risk management: circuit breaker, position limits, loss limits
 - Strategy framework: traits, router, executor with policies
 - Event-driven architecture: <1ms latency, efficient async
-- **NEW:** Market pair registry for YES/NO (Up/Down) token tracking
-- **NEW:** Dynamic edge calculator with fee/liquidity awareness
-- **NEW:** MathArbStrategy with arb detection and intent generation
-- All tests passing (115 unit tests)
+- Market pair registry for YES/NO (Up/Down) token tracking
+- Dynamic edge calculator with fee/liquidity awareness
+- MathArbStrategy with arb detection and intent generation
+- **NEW (Phase 7.5):** Gamma API client for market discovery
+- **NEW (Phase 7.5):** Slug-based discovery for 15-min crypto markets (BTC, ETH, SOL)
+- **NEW (Phase 7.5):** MarketPair supports Up/Down outcomes (not just Yes/No)
+- **NEW (Phase 7.5):** Bot auto-discovers live markets on startup
+- All tests passing (136 unit tests)
 
 ---
 

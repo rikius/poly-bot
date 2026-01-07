@@ -8,11 +8,59 @@
 //! which are NOT accessible via the CLOB `/market/{id}` endpoint.
 
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use tracing::{debug, warn};
 
 use crate::constants::GAMMA_API_URL;
 use crate::error::{BotError, Result};
+
+/// Custom deserializer for fields that can be either a string or a number
+fn deserialize_string_or_number<'de, D>(deserializer: D) -> std::result::Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+    
+    struct StringOrNumber;
+    
+    impl<'de> Visitor<'de> for StringOrNumber {
+        type Value = f64;
+        
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string or number")
+        }
+        
+        fn visit_f64<E>(self, v: f64) -> std::result::Result<f64, E>
+        where
+            E: de::Error,
+        {
+            Ok(v)
+        }
+        
+        fn visit_i64<E>(self, v: i64) -> std::result::Result<f64, E>
+        where
+            E: de::Error,
+        {
+            Ok(v as f64)
+        }
+        
+        fn visit_u64<E>(self, v: u64) -> std::result::Result<f64, E>
+        where
+            E: de::Error,
+        {
+            Ok(v as f64)
+        }
+        
+        fn visit_str<E>(self, v: &str) -> std::result::Result<f64, E>
+        where
+            E: de::Error,
+        {
+            v.parse::<f64>().map_err(de::Error::custom)
+        }
+    }
+    
+    deserializer.deserialize_any(StringOrNumber)
+}
 
 // ============================================================================
 // RESPONSE TYPES
@@ -106,21 +154,21 @@ pub struct GammaMarket {
     #[serde(default)]
     pub accepting_orders: bool,
     
-    /// 24-hour trading volume (string to handle large numbers)
+    /// 24-hour trading volume
     #[serde(rename = "volume24hr", default)]
-    pub volume_24hr: String,
+    pub volume_24hr: f64,
     
     /// Total liquidity
-    #[serde(default)]
-    pub liquidity: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_number")]
+    pub liquidity: f64,
     
     /// Best ask price
     #[serde(default)]
-    pub best_ask: Option<String>,
+    pub best_ask: Option<f64>,
     
     /// Best bid price  
     #[serde(default)]
-    pub best_bid: Option<String>,
+    pub best_bid: Option<f64>,
     
     /// End date ISO string
     #[serde(default)]
@@ -259,7 +307,9 @@ impl GammaClient {
     
     /// Get all crypto 15-minute events
     /// 
-    /// Filters for events with "crypto" tag and Up/Down market structure
+    /// **NOTE**: This method filters from get_active_events() which does NOT
+    /// return 15-min crypto markets! Use `discover_crypto_15min_markets()` instead.
+    #[deprecated(note = "Use discover_crypto_15min_markets() for 15-min crypto discovery")]
     pub async fn get_crypto_15min_events(&self) -> Result<Vec<GammaEvent>> {
         // First get all active events, then filter
         let events = self.get_active_events().await?;
@@ -274,6 +324,79 @@ impl GammaClient {
         
         debug!(count = crypto_events.len(), "Found crypto 15-min events");
         Ok(crypto_events)
+    }
+    
+    /// Supported crypto assets for 15-min Up/Down markets
+    pub const CRYPTO_ASSETS: &'static [&'static str] = &["btc", "eth", "sol"];
+    
+    /// Discover 15-minute crypto markets by slug pattern
+    /// 
+    /// 15-min crypto markets use slug format: `{asset}-updown-15m-{timestamp}`
+    /// where timestamp is a Unix epoch rounded to 15-minute intervals.
+    /// 
+    /// This method queries for:
+    /// - Current active market (current 15-min interval)  
+    /// - Next upcoming market (next 15-min interval)
+    /// 
+    /// For each supported crypto asset (BTC, ETH, SOL).
+    pub async fn discover_crypto_15min_markets(&self) -> Result<Vec<GammaEvent>> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| BotError::Config(format!("System time error: {}", e)))?
+            .as_secs();
+        
+        // Round to 15-minute intervals (900 seconds)
+        let interval = 900u64;
+        let current_interval = (now / interval) * interval;
+        
+        // Generate intervals to check:
+        // - Current (may be in progress or about to start)
+        // - Next (upcoming)
+        // - One after (further ahead)
+        let intervals = [
+            current_interval,
+            current_interval + interval,
+            current_interval + 2 * interval,
+        ];
+        
+        let mut all_events = Vec::new();
+        
+        for asset in Self::CRYPTO_ASSETS {
+            for &ts in &intervals {
+                let slug = format!("{}-updown-15m-{}", asset, ts);
+                match self.get_event_by_slug(&slug).await {
+                    Ok(Some(event)) => {
+                        // Check if event has tradeable markets
+                        let has_tradeable = event.markets.iter().any(|m| {
+                            m.is_crypto_15min() && m.is_tradeable()
+                        });
+                        
+                        if has_tradeable {
+                            debug!(
+                                slug = %slug, 
+                                asset = %asset,
+                                markets = event.markets.len(),
+                                "Found 15-min crypto event"
+                            );
+                            all_events.push(event);
+                        } else {
+                            debug!(slug = %slug, "Event exists but no tradeable markets");
+                        }
+                    }
+                    Ok(None) => {
+                        debug!(slug = %slug, "No event found for slug");
+                    }
+                    Err(e) => {
+                        warn!(slug = %slug, error = %e, "Error fetching event");
+                    }
+                }
+            }
+        }
+        
+        debug!(count = all_events.len(), "Discovered 15-min crypto events");
+        Ok(all_events)
     }
     
     /// Internal fetch helper
@@ -332,8 +455,8 @@ mod tests {
             closed: false,
             archived: false,
             accepting_orders: true,
-            volume_24hr: String::new(),
-            liquidity: String::new(),
+            volume_24hr: 0.0,
+            liquidity: 0.0,
             best_ask: None,
             best_bid: None,
             end_date: None,
@@ -359,8 +482,8 @@ mod tests {
             closed: false,
             archived: false,
             accepting_orders: true,
-            volume_24hr: String::new(),
-            liquidity: String::new(),
+            volume_24hr: 0.0,
+            liquidity: 0.0,
             best_ask: None,
             best_bid: None,
             end_date: None,
@@ -386,8 +509,8 @@ mod tests {
             closed: false,
             archived: false,
             accepting_orders: false,
-            volume_24hr: String::new(),
-            liquidity: String::new(),
+            volume_24hr: 0.0,
+            liquidity: 0.0,
             best_ask: None,
             best_bid: None,
             end_date: None,
@@ -413,8 +536,8 @@ mod tests {
             closed: false,
             archived: false,
             accepting_orders: true,
-            volume_24hr: String::new(),
-            liquidity: String::new(),
+            volume_24hr: 0.0,
+            liquidity: 0.0,
             best_ask: None,
             best_bid: None,
             end_date: None,
@@ -444,8 +567,8 @@ mod tests {
             closed: false,
             archived: false,
             accepting_orders: false,
-            volume_24hr: String::new(),
-            liquidity: String::new(),
+            volume_24hr: 0.0,
+            liquidity: 0.0,
             best_ask: None,
             best_bid: None,
             end_date: None,
@@ -482,7 +605,8 @@ mod tests {
                     "closed": false,
                     "archived": false,
                     "acceptingOrders": true,
-                    "volume24hr": "1000000"
+                    "volume24hr": 1000000.0,
+                    "liquidity": 50000.0
                 }
             ],
             "tags": []

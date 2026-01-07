@@ -20,7 +20,6 @@ use crate::error::{BotError, Result};
 use crate::strategy::market_pair::MarketPair;
 
 use rust_decimal::Decimal;
-use std::str::FromStr;
 use tracing::{debug, info, warn};
 
 // ============================================================================
@@ -181,9 +180,9 @@ fn try_convert_market(market: &GammaMarket, event_slug: &str) -> Result<Discover
     // Classify outcome type
     let outcome_type = classify_outcomes(&outcomes[0], &outcomes[1]);
     
-    // Parse volume and liquidity (default to 0 if empty/invalid)
-    let volume_24h = Decimal::from_str(&market.volume_24hr).unwrap_or_default();
-    let liquidity = Decimal::from_str(&market.liquidity).unwrap_or_default();
+    // Convert f64 to Decimal
+    let volume_24h = Decimal::try_from(market.volume_24hr).unwrap_or_default();
+    let liquidity = Decimal::try_from(market.liquidity).unwrap_or_default();
     
     // Determine fee rate - check if provided or infer from market type
     let fee_rate_bps = market.fee_rate_bps.unwrap_or_else(|| {
@@ -264,11 +263,17 @@ impl MarketDiscovery {
     }
     
     /// Discover 15-minute crypto markets specifically
+    /// 
+    /// Uses slug-based discovery to find markets like:
+    /// - btc-updown-15m-{timestamp}
+    /// - eth-updown-15m-{timestamp}
+    /// - sol-updown-15m-{timestamp}
     pub async fn discover_crypto_15min(&self) -> Result<Vec<DiscoveredMarket>> {
-        info!("Discovering 15-min crypto markets...");
+        info!("Discovering 15-min crypto markets via slug pattern...");
         
-        let events = self.gamma_client.get_crypto_15min_events().await?;
-        info!(event_count = events.len(), "Found crypto events");
+        // Use the new slug-based discovery method
+        let events = self.gamma_client.discover_crypto_15min_markets().await?;
+        info!(event_count = events.len(), "Found crypto events via slug discovery");
         
         let filter = MarketFilter::crypto_15min();
         self.process_events(events, &filter)
@@ -462,8 +467,8 @@ mod tests {
             closed: false,
             archived: false,
             accepting_orders: true,
-            volume_24hr: "50000".to_string(),
-            liquidity: "10000".to_string(),
+            volume_24hr: 50000.0,
+            liquidity: 10000.0,
             best_ask: None,
             best_bid: None,
             end_date: None,

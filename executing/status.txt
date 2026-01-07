@@ -598,3 +598,130 @@ WebSocket Update → OrderBookState::update_level()
 - ✅ MathArbStrategy correctly detects arb opportunities
 - ✅ Strategy properly integrated into Bot event loop
 - ✅ Market pairs passed from main.rs to Bot to Strategy
+
+---
+
+## Phase 7.5: API Fix & Market Discovery ✅
+
+**Objective:** Fix CLOB/Gamma API issues and implement dynamic market discovery for 15-min crypto markets.
+
+### Problem Identified:
+
+1. **CLOB API /market/{id}** returns 404 for 15-min crypto markets
+2. **Gamma API** needed for market discovery but had JSON parsing issues
+3. **Static market config** required manual token ID entry in main.rs
+4. **15-min markets not in standard active query** - need slug-based discovery
+
+### Files Created:
+
+1. **src/api/gamma.rs** (~640 lines)
+   - `GammaClient` for Polymarket's Gamma API
+   - `GammaEvent` struct: Event with multiple markets
+   - `GammaMarket` struct: Market with stringified JSON fields
+   - Custom `string_or_number` deserializer for flexible parsing
+   - `parse_outcomes()` / `parse_token_ids()`: Parse stringified JSON arrays
+   - `is_crypto_15min()`, `is_yes_no()`, `is_tradeable()` helpers
+   - **NEW:** `discover_crypto_15min_markets()`: Slug-based discovery
+     - Generates slugs like `btc-updown-15m-{timestamp}`
+     - Supports BTC, ETH, SOL
+     - Checks current + next 2 time intervals (15 min each)
+   - 9 unit tests (all passing)
+
+2. **src/api/discovery.rs** (~530 lines)
+   - `MarketFilter`: Filter criteria (outcome type, volume, liquidity, limit)
+   - `OutcomeType` enum: YesNo, UpDown, Other
+   - `DiscoveredMarket`: Parsed market ready for trading
+   - `MarketDiscovery` service: 
+     - `discover_all()`: All active markets with filter
+     - `discover_crypto_15min()`: 15-min crypto via slug pattern
+     - `discover_by_slug()`: Specific event by slug
+   - `to_market_pair()`: Convert to MarketPair for strategy
+   - 8 unit tests (all passing)
+
+### Files Updated:
+
+1. **src/api/mod.rs**
+   - Added: `pub mod gamma; pub mod discovery;`
+   - New exports: `GammaClient, MarketDiscovery, MarketFilter, DiscoveredMarket`
+
+2. **src/api/endpoints.rs**
+   - Fixed `MarketsResponse` wrapper for `/markets` endpoint
+   - Added `base_fee` field to `MarketInfo` struct
+
+3. **src/strategy/market_pair.rs**
+   - Added `new_up_down()` constructor for Up/Down markets
+   - `first_token_id` / `second_token_id` (generic naming)
+   - Keeps `yes_token_id` / `no_token_id` as aliases for compatibility
+
+4. **src/main.rs** (~150 lines)
+   - Removed hardcoded market tokens
+   - Added `MarketDiscovery` usage on startup
+   - Auto-discovers 15-min crypto markets via slug pattern
+   - Falls back to hardcoded tokens only if discovery fails
+   - Logs discovered markets with condition_id, tokens, fee rate
+
+5. **src/constants.rs**
+   - Moved `GAMMA_API_URL` constant here (removed duplicate)
+
+### Discovery Algorithm:
+
+```rust
+// 1. Calculate current 15-min interval
+let interval = 900; // seconds
+let current = (now / interval) * interval;
+
+// 2. Generate slugs for each crypto asset and time interval
+for asset in ["btc", "eth", "sol"] {
+    for ts in [current, current + 900, current + 1800] {
+        let slug = format!("{}-updown-15m-{}", asset, ts);
+        // Query: GET https://gamma-api.polymarket.com/events?slug={slug}
+    }
+}
+
+// 3. Parse response, filter for tradeable markets
+// 4. Convert to MarketPair for strategy consumption
+```
+
+### Bot Startup Output (Example):
+
+```
+Discovering 15-min crypto markets from Gamma API...
+Found crypto events via slug discovery event_count=9
+Discovered 5 tradeable 15-min crypto markets
+  Market: 0xb5bf... (Up/Down)
+    Question: Bitcoin Up or Down - January 7, 10:00AM-10:15AM ET
+    First token: 32823872321...
+    Second token: 20373369990...
+    Fee rate: 1000 bps
+  Market: 0xed87... (Up/Down)
+    Question: Bitcoin Up or Down - January 7, 10:15AM-10:30AM ET
+    ...
+Registered 5 market pair(s) with 10 token(s)
+WebSocket connected to market data stream
+Subscribed to 10 tokens
+```
+
+### Validation:
+- ✅ cargo build succeeds (no warnings)
+- ✅ cargo test passes (136 tests total, up from 115)
+- ✅ New tests: 21 (9 gamma + 8 discovery + 4 updated)
+- ✅ Bot discovers live 15-min crypto markets on startup
+- ✅ WebSocket subscribes to discovered tokens
+- ✅ Order book data streaming for all discovered markets
+
+---
+
+## Next Steps: Phase 8 - Wire Execution Policies
+
+**What needs to be done:**
+1. Wire TakerPolicy/MakerPolicy into Bot execution flow
+2. Complete TODO in bot.rs: circuit breaker check, policy application, order signing
+3. Integrate OrderExecutor with actual API calls
+4. Test paper trading end-to-end with real intents
+
+**Current State of Taker/Maker:**
+- ✅ `MathArbConfig.use_maker_execution` flag exists
+- ✅ `EdgeCalculator.taker()` / `.maker()` different thresholds
+- ✅ `TakerPolicy` and `MakerPolicy` implemented
+- ❌ Bot doesn't use policies yet (TODO comment in bot.rs:296)
+- ❌ Orders not actually signed/submitted (paper trading mode)

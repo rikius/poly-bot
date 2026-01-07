@@ -2,7 +2,7 @@
 //!
 //! High-frequency trading bot for Polymarket prediction markets.
 
-use polymarket_bot::api::{MarketDiscovery, MarketFilter};
+use polymarket_bot::api::MarketDiscovery;
 use polymarket_bot::strategy::MarketPair;
 use polymarket_bot::{Bot, Config, KillSwitch};
 use std::sync::Arc;
@@ -72,16 +72,19 @@ async fn main() -> anyhow::Result<()> {
     // MARKET DISCOVERY
     // ===========================================================================
     // Discover 15-minute crypto markets from Gamma API
+    // Uses slug-based discovery: btc-updown-15m-{timestamp}, etc.
     // ===========================================================================
 
-    info!("Discovering markets from Gamma API...");
+    info!("Discovering 15-min crypto markets from Gamma API...");
     
     let discovery = MarketDiscovery::new();
     
-    // Discover 15-min crypto markets (Up/Down)
-    let filter = MarketFilter::crypto_15min().with_limit(5);
-    let discovered = match discovery.discover_all(&filter).await {
-        Ok(markets) => markets,
+    // Discover 15-min crypto markets (Up/Down) using slug pattern discovery
+    let discovered = match discovery.discover_crypto_15min().await {
+        Ok(markets) => {
+            // Limit to first 5 markets
+            markets.into_iter().take(5).collect::<Vec<_>>()
+        }
         Err(e) => {
             warn!("Failed to discover markets from API: {}", e);
             warn!("Falling back to hardcoded test market...");
