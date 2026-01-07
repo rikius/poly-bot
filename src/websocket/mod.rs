@@ -5,5 +5,7 @@
 //! - User WS: Trade notifications (fills, order status)
 
 pub mod market;
+pub mod user;
 
 pub use market::{MarketWebSocket, MarketMessage, BookUpdateMessage};
+pub use user::{UserWebSocket, UserMessage, TradeNotification};

@@ -1,3 +1,10 @@
-//! Execution module - order state machine and policies
+//! Execution module - order state machine and execution policies
 //!
-//! Implemented in Phase 4
+//! Manages order lifecycle and ensures state consistency.
+
+pub mod state_machine;
+
+pub use state_machine::{
+    can_cancel, check_invariants, requires_ack, validate_transition, Discrepancy,
+    InvariantViolation,
+};
