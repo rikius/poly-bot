@@ -25,15 +25,17 @@ pub struct MarketWebSocket {
 /// Message types from market WebSocket
 #[derive(Debug, Clone)]
 pub enum MarketMessage {
-    /// Book update for a specific token
-    BookUpdate(BookUpdateMessage),
+    /// Full book snapshot for a specific token
+    BookSnapshot(BookUpdateMessage),
+    /// Single level update (from price_change)
+    LevelUpdate(LevelUpdateMessage),
     /// Connection established
     Connected,
     /// Connection lost, reconnecting
     Reconnecting,
 }
 
-/// Order book update message
+/// Order book update message (full snapshot)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BookUpdateMessage {
@@ -53,6 +55,25 @@ pub struct BookUpdateMessage {
     pub bids: Vec<PriceLevel>,
     /// Sell side levels (asks)
     pub asks: Vec<PriceLevel>,
+}
+
+/// Single price level update (from price_change event)
+#[derive(Debug, Clone)]
+pub struct LevelUpdateMessage {
+    /// Token ID
+    pub token_id: TokenId,
+    /// Market ID
+    pub market: String,
+    /// Side: "BUY" or "SELL"
+    pub side: String,
+    /// Price level
+    pub price: String,
+    /// Size at this level (0 = remove)
+    pub size: String,
+    /// Timestamp
+    pub timestamp: Option<i64>,
+    /// Hash
+    pub hash: Option<String>,
 }
 
 /// Subscription request message
@@ -173,6 +194,9 @@ impl MarketWebSocket {
     async fn handle_message(&self, msg: Message) -> Result<()> {
         match msg {
             Message::Text(text) => {
+                // Log raw messages for debugging (truncated)
+                debug!("Raw WS message: {}", &text[..text.len().min(200)]);
+
                 // Parse as generic JSON to see what we have
                 let json_value: serde_json::Value = serde_json::from_str(&text)
                     .map_err(|e| BotError::Json(format!("Invalid JSON: {}", e)))?;
@@ -180,36 +204,20 @@ impl MarketWebSocket {
                 // Polymarket book messages have this structure:
                 // { "event_type": "book", "asset_id": "...", "market": "...", "timestamp": ..., "hash": "...", "bids": [...], "asks": [...] }
                 // OR sometimes: { "asset_id": "...", ...other fields... }
+                // Also: "price_change" events for individual level updates
 
                 if let Some(event_type) = json_value.get("event_type").and_then(|v| v.as_str()) {
-                    if event_type == "book" {
-                        // Extract fields from JSON
-                        if let (Some(asset_id), Some(market), Some(bids_val), Some(asks_val)) = (
-                            json_value.get("asset_id").and_then(|v| v.as_str()),
-                            json_value.get("market").and_then(|v| v.as_str()),
-                            json_value.get("bids"),
-                            json_value.get("asks"),
-                        ) {
-                            // Parse bids and asks arrays
-                            let bids: Vec<PriceLevel> = serde_json::from_value(bids_val.clone())
-                                .unwrap_or_default();
-                            let asks: Vec<PriceLevel> = serde_json::from_value(asks_val.clone())
-                                .unwrap_or_default();
-
-                            let timestamp = json_value.get("timestamp").and_then(|v| v.as_i64());
-                            let hash = json_value.get("hash").and_then(|v| v.as_str()).map(String::from);
-
-                            let book_update = BookUpdateMessage {
-                                token_id: asset_id.to_string(),
-                                market: market.to_string(),
-                                asset: asset_id.to_string(),
-                                timestamp,
-                                hash,
-                                bids,
-                                asks,
-                            };
-
-                            let _ = self.message_tx.send(MarketMessage::BookUpdate(book_update));
+                    match event_type {
+                        "book" => {
+                            // Full book snapshot
+                            self.handle_book_event(&json_value)?;
+                        }
+                        "price_change" => {
+                            // Price level update - also contains best bid/ask
+                            self.handle_price_change_event(&json_value)?;
+                        }
+                        other => {
+                            debug!("Unknown event type: {}", other);
                         }
                     }
                 } else {
@@ -229,6 +237,79 @@ impl MarketWebSocket {
             }
         }
 
+        Ok(())
+    }
+
+    /// Handle a full book snapshot event
+    fn handle_book_event(&self, json_value: &serde_json::Value) -> Result<()> {
+        if let (Some(asset_id), Some(market), Some(bids_val), Some(asks_val)) = (
+            json_value.get("asset_id").and_then(|v| v.as_str()),
+            json_value.get("market").and_then(|v| v.as_str()),
+            json_value.get("bids"),
+            json_value.get("asks"),
+        ) {
+            let bids: Vec<PriceLevel> = serde_json::from_value(bids_val.clone())
+                .unwrap_or_default();
+            let asks: Vec<PriceLevel> = serde_json::from_value(asks_val.clone())
+                .unwrap_or_default();
+
+            let timestamp = json_value.get("timestamp").and_then(|v| v.as_i64());
+            let hash = json_value.get("hash").and_then(|v| v.as_str()).map(String::from);
+
+            let book_update = BookUpdateMessage {
+                token_id: asset_id.to_string(),
+                market: market.to_string(),
+                asset: asset_id.to_string(),
+                timestamp,
+                hash,
+                bids,
+                asks,
+            };
+
+            info!(
+                "Book snapshot: {} levels bid, {} levels ask",
+                book_update.bids.len(),
+                book_update.asks.len()
+            );
+
+            let _ = self.message_tx.send(MarketMessage::BookSnapshot(book_update));
+        }
+        Ok(())
+    }
+
+    /// Handle a price_change event (incremental update)
+    fn handle_price_change_event(&self, json_value: &serde_json::Value) -> Result<()> {
+        // price_change events contain a list of individual level updates
+        // Each update is for a single price level on one side
+
+        if let Some(market) = json_value.get("market").and_then(|v| v.as_str()) {
+            let timestamp = json_value.get("timestamp").and_then(|v| v.as_i64());
+
+            if let Some(price_changes) = json_value.get("price_changes").and_then(|v| v.as_array()) {
+                for change in price_changes {
+                    if let (Some(asset_id), Some(price), Some(size), Some(side)) = (
+                        change.get("asset_id").and_then(|v| v.as_str()),
+                        change.get("price").and_then(|v| v.as_str()),
+                        change.get("size").and_then(|v| v.as_str()),
+                        change.get("side").and_then(|v| v.as_str()),
+                    ) {
+                        let hash = change.get("hash").and_then(|v| v.as_str()).map(String::from);
+
+                        let level_update = LevelUpdateMessage {
+                            token_id: asset_id.to_string(),
+                            market: market.to_string(),
+                            side: side.to_uppercase(),
+                            price: price.to_string(),
+                            size: size.to_string(),
+                            timestamp,
+                            hash,
+                        };
+
+                        let _ = self.message_tx.send(MarketMessage::LevelUpdate(level_update));
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }

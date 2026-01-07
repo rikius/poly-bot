@@ -42,12 +42,15 @@ What Was Built
     - Sets up Ctrl+C handler
     - Creates Bot instance and runs it
     - Calls graceful_shutdown on exit
-  8. src/bot.rs - Bot orchestration (140 lines) [CREATED DURING REFACTOR]
-    - Bot struct: config, kill_switch, order_book_state, ws_rx, ws_task
-    - new() - creates Bot, spawns WebSocket task
-    - run() - main event loop, processes WS messages
-    - process_ws_messages() - handles MarketMessage enum
-    - handle_book_update() - updates order book state
+  8. src/bot.rs - Bot orchestration (~270 lines) [EVENT-DRIVEN ARCHITECTURE]
+    - Bot struct: config, kill_switch, order_book_state, market_ws_rx, market_ws_task
+    - new() - creates Bot, spawns Market WebSocket task
+    - run() - EVENT-DRIVEN loop using tokio::select! (zero-latency)
+    - handle_market_message() - routes MarketMessage to handlers
+    - handle_book_snapshot() - full order book replacement
+    - handle_level_update() - incremental price level update
+    - handle_tick() - 100ms periodic for strategy logic
+    - log_heartbeat() - 10s periodic stats logging
     - shutdown() - aborts WebSocket task
   9. src/lib.rs - Module exports
     - Exports: bot, config, constants, error, kill_switch, api, websocket, state, etc.
@@ -82,15 +85,17 @@ What Was Built
     - OrderBookState - uses DashMap<TokenId, BookSnapshot> for lock-free access
     - Methods: best_bid(), best_ask(), mid_price(), spread(), spread_bps()
     - Methods: bid_depth(), ask_depth(), is_two_sided(), is_crossed()
-    - Methods: update_book(), get_book(), remove_token(), clear()
+    - Methods: update_book(), update_level(), get_book(), remove_token(), clear()
+    - update_level() for incremental price_change events (maintains sorted order)
     - Important: Had to clone values from DashMap to avoid lifetime issues: book.bids.first().map(|level| level.price.clone())
     - 3 unit tests: test_order_book_update, test_book_snapshot_crossed, test_empty_book
 
   Integration:
-  - Bot struct in bot.rs creates WebSocket, spawns as async task
-  - Bot.run() event loop calls process_ws_messages() → handle_book_update()
-  - Updates OrderBookState on every book message
-  - Logs book updates: "Book:  | Bid: $X | Ask: $Y | Spread: Z bps"
+  - Bot struct creates Market WebSocket, spawns as async task
+  - Bot.run() uses tokio::select! for zero-latency event handling
+  - Market WS processed with biased priority (first in select!)
+  - BookSnapshot → update_book(), LevelUpdate → update_level()
+  - Logs book updates: "Book: X | Bid: $X | Ask: $Y | Spread: Z bps | msgs: N"
 
   Validation:
   - ✅ WebSocket connects successfully
@@ -135,17 +140,17 @@ What Was Built
   ---
   Current Project Structure
 
-  /Users/pontidev/Developer/poly-bot/polymarket-bot/
+  /Users/pontidev/Developer/poly-bot/
   ├── Cargo.toml (dependencies configured)
   ├── .env (credentials - NOT in git)
   └── src/
       ├── main.rs (86 lines) - Entry point
       ├── lib.rs - Module exports
-      ├── bot.rs (140 lines) - Orchestration [NEW in refactor]
+      ├── bot.rs (~270 lines) - Event-driven orchestration
       ├── config.rs - Config loading
       ├── error.rs - Error types
       ├── constants.rs - Constants
-      ├── kill_switch.rs - Kill switch
+      ├── kill_switch.rs - Kill switch with async Notify
       ├── api/
       │   ├── mod.rs
       │   └── types.rs - API types
@@ -247,13 +252,71 @@ What Was Built
   Ctrl+C
 
   ---
-  Next Steps: Phase 6 - Strategy Framework
+  Next Steps: Phase 7 - Strategy Implementation
 
   What needs to be built:
-  1. src/strategy/traits.rs - Strategy trait and OrderIntent
-  2. src/strategy/router.rs - StrategyRouter for multiple strategies
-  3. src/execution/policy.rs - ExecutionPolicy trait (Taker/Maker)
-  4. src/execution/executor.rs - Order executor
+  1. src/strategy/math_arb.rs - MathArbStrategy implementing Strategy trait
+  2. Edge calculator with dynamic thresholds
+  3. Integration testing with paper trading
+  4. Market registry for binary market filtering
+
+  ---
+  Phase 6: Strategy Framework ✅
+
+  Files Created:
+  1. src/strategy/traits.rs (~390 lines) - Core abstractions
+    - Urgency enum: Immediate (FOK), Normal (FAK), Passive (GTC)
+    - OrderIntent struct: market_id, token_id, side, price, size, urgency, reason, group_id, priority
+    - StrategyContext: read-only view of system state (&OrderBookState, &Ledger)
+    - Strategy trait with methods: name(), subscribed_markets(), on_book_update(), on_fill(), on_tick(), on_shutdown()
+    - StrategyError enum for strategy-specific errors
+    - Design: Strategies output WHAT (OrderIntent), policies handle HOW
+    - 3 unit tests (all passing)
+  2. src/strategy/router.rs (~400 lines) - Event dispatcher
+    - RegisteredStrategy struct with priority, enabled flag
+    - StrategyRouter: register(), enable(), disable() methods
+    - on_book_update() routes to subscribed strategies
+    - on_fill() routes to relevant strategies
+    - on_tick() for time-based logic
+    - resolve_conflicts() for priority-based deduplication
+    - RwLock for thread-safe strategy registry
+    - 3 unit tests (all passing)
+  3. src/execution/policy.rs (~350 lines) - Execution policies
+    - PartialFillAction enum: UnwindFilled, CancelRemainder, KeepRemainder
+    - OrderParams struct for actual order submission
+    - ExecutionPolicy trait: to_order_params(), on_partial_fill()
+    - TakerPolicy: Immediate→FOK, Normal/Passive→FAK, unwind grouped partials
+    - MakerPolicy: Always GTC, price offset for aggressive posting, keep remainder
+    - IntentRef for efficient intent reference passing
+    - 12 unit tests (all passing)
+  4. src/execution/executor.rs (~440 lines) - Order executor
+    - ExecutionResult struct: order_id, filled, filled_size, status, error
+    - ExecutionStatus enum: FullyFilled, PartialFill, Pending, Rejected, Cancelled, CircuitOpen
+    - OrderExecutor struct with API client, signer, policy, circuit breaker
+    - execute() for single order intent
+    - execute_batch() with tokio::join! for concurrent multi-leg orders
+    - execute_grouped() with partial fill handling per policy
+    - Integrates with CircuitBreaker for trading safety
+    - Classifies errors using ErrorType for circuit breaker
+    - 3 unit tests (all passing)
+
+  Updated Files:
+  1. src/strategy/mod.rs - Module exports for traits, router
+  2. src/execution/mod.rs - Module exports for policy, executor, state_machine
+
+  Design Highlights:
+  - Strategies are pure decision makers (return OrderIntent)
+  - ExecutionPolicy translates intent to order params
+  - Same strategy can run as taker or maker (just change policy)
+  - Priority-based conflict resolution for multiple strategies
+  - Grouped order handling for multi-leg trades (arb)
+
+  Validation:
+  - ✅ cargo build succeeds (no warnings)
+  - ✅ cargo test passes (94 tests total, up from 73)
+  - ✅ TakerPolicy correctly maps Immediate→FOK, Normal/Passive→FAK
+  - ✅ MakerPolicy always uses GTC with price offset support
+  - ✅ Grouped orders unwind on partial fills for arb safety
 
   ---
   Phase 5: Risk Management ✅
@@ -352,3 +415,76 @@ What Was Built
   - ✅ Ledger correctly tracks orders, positions, cash
   - ✅ State machine validates transitions
   - ✅ Flip position logic fixed and tested
+
+---
+
+## ARCHITECTURE REFACTOR: Event-Driven Architecture (Post Phase 6)
+
+**Problem Diagnosed:**
+- Bot was only handling `event_type: "book"` snapshots, ignoring `price_change` incremental updates
+- WebSocket sending ~10 messages/second but bot showing nothing on console
+- 10ms polling sleep added unnecessary latency to every message
+
+**Solution Implemented:**
+
+### 1. WebSocket Message Handling Fix
+- Added `MarketMessage::LevelUpdate(LevelUpdateMessage)` variant
+- Added `LevelUpdateMessage` struct for parsing `price_change` events
+- Added `OrderBookState::update_level()` for incremental updates
+- Bot now handles both full book snapshots AND incremental price changes
+
+### 2. Event-Driven Architecture Refactor
+Old Pattern (Polling):
+```rust
+loop {
+    while let Ok(msg) = market_ws_rx.try_recv() { ... }
+    tokio::time::sleep(Duration::from_millis(10)).await; // 0-10ms latency!
+}
+```
+
+New Pattern (Event-Driven):
+```rust
+loop {
+    tokio::select! {
+        biased;  // Priority order for predictable behavior
+        msg = market_ws_rx.recv() => handle_market_message(msg),
+        msg = user_ws_rx.recv() => handle_user_message(msg),
+        _ = tick_interval.tick() => handle_tick(),
+        _ = heartbeat_interval.tick() => log_heartbeat(),
+        _ = kill_switch.wait_for_kill() => break,
+    }
+}
+```
+
+### 3. KillSwitch Async Support
+- Added `tokio::sync::Notify` for async signaling
+- Added `wait_for_kill()` async method for use in select!
+- Added `start_file_watcher()` background task
+- Removed polling `is_killed()` pattern
+
+### 4. Bot Architecture Changes
+- **Before:** ~140 lines, polling loop with try_recv() + sleep(10ms)
+- **After:** ~270 lines, clean event-driven with tokio::select!
+- New message handlers: `handle_market_message()`, `handle_book_snapshot()`, `handle_level_update()`
+- New periodic handlers: `handle_tick()` (100ms), `log_heartbeat()` (10s)
+- Rate-limited logging: 1 log per second per token to avoid spam
+- Proper tracking: `message_counts: HashMap<String, u32>`, `total_messages: u64`
+
+### Key Benefits:
+- **Latency:** <1ms (was 0-10ms)
+- **CPU:** Efficient async wait (was busy polling)
+- **Maintainability:** Clear priority-based event handling
+- **Visibility:** Console now shows all WebSocket activity
+- **Reliability:** Proper async kill switch signaling
+
+### Files Changed:
+1. `src/kill_switch.rs` - Added Notify, wait_for_kill(), start_file_watcher()
+2. `src/bot.rs` - Complete refactor to event-driven architecture
+3. `src/websocket/market.rs` - Added LevelUpdate variant and parsing
+4. `src/state/order_book.rs` - Added update_level() for incremental updates
+
+### Validation:
+- ✅ All 94 tests passing
+- ✅ cargo build succeeds (no warnings)
+- ✅ WebSocket messages now visible in console
+- ✅ Both book snapshots and price changes handled

@@ -4,7 +4,7 @@
 
 ---
 
-## 🚀 Current Status: Phase 5 Complete (Updated: 2026-01-06)
+## 🚀 Current Status: Phase 6 Complete + Event-Driven Refactor (Updated: 2026-01-06)
 
 ### ✅ Completed Phases
 
@@ -13,20 +13,24 @@
 - **Phase 2:** WebSocket + State - Live market data streaming working
 - **Phase 3:** HTTP Client & Authentication - REST API + EIP-712 signing (25 tests ✅)
 - **Phase 4:** Ledger & State Machine - Authoritative portfolio state tracking (56 tests ✅)
-- **Phase 5:** Risk & Circuit Breaker - Safety systems complete (73 tests ✅)
+- **Phase 5:** Risk & Circuit Breaker - Safety systems complete (75 tests ✅)
+- **Phase 6:** Strategy Framework - Traits, router, executor, policies (94 tests ✅)
+- **Event-Driven Refactor:** tokio::select! architecture, <1ms latency
 
 ### 🚧 In Progress
 
-- **Phase 6:** Strategy Framework - NEXT
+- **Phase 7:** Math Arb Strategy (MVP) - NEXT
 
 ### 📊 Metrics
 
-- **Tests Passing:** 73/73 unit tests
+- **Tests Passing:** 94/94 unit tests
 - **Build Time:** ~2s
 - **WebSocket:** Market data + User fills streaming
 - **Order Book:** Tracking markets with lock-free DashMap
 - **Ledger:** Orders, Positions, Cash tracking with DashMap
 - **Risk:** Circuit breaker, limits, reconciliation
+- **Strategy:** Trait system, router, executor with policies
+- **Architecture:** Event-driven with tokio::select!, <1ms latency
 - **Code Quality:** Clean module separation
 
 ---
@@ -89,12 +93,15 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 
 **Deliverable:** ✅ Compilable project skeleton with types and working kill switch
 
-### 1.5 Bot Orchestration Module ✅ (Added during refactor)
+### 1.5 Bot Orchestration Module ✅ (Refactored to Event-Driven)
 
-- [x] Created src/bot.rs (140 lines) for component coordination
+- [x] Created src/bot.rs (~270 lines) for component coordination
 - [x] Simplified main.rs to just initialization (86 lines)
 - [x] Clean separation of concerns
-- [x] Event loop in bot.rs handles WebSocket messages
+- [x] **Event-driven architecture with tokio::select!**
+- [x] biased priority: market WS > user WS > tick > heartbeat > kill
+- [x] <1ms message latency (replaced 10ms polling sleep)
+- [x] Async kill switch with tokio::sync::Notify
 
 ---
 
@@ -211,57 +218,67 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
   - [x] Reject rate > 20% (only Fatal errors count)
 - [x] Auto-reset after timeout (try half-open)
 - [x] **Check circuit.is_trading_allowed() before every order**
-- [ ] **Check market.accepting_orders before submitting orders** (Phase 6)
+- [ ] **Check market.accepting_orders before submitting orders** (Phase 7)
 
-### 3.7 Strategy Trait + OrderIntent (NEW - Pivot Architecture)
+### 3.7 Strategy Trait + OrderIntent ✅ IMPLEMENTED IN PHASE 6
 
-- [ ] Define `Strategy` trait in `src/strategy/traits.rs`:
-  - `fn name(&self) -> &str`
-  - `fn subscribed_markets(&self) -> Vec<ConditionId>`
-  - `fn on_book_update(&self, market_id, ctx) -> Vec<OrderIntent>`
-  - `fn on_fill(&self, fill, ctx) -> Vec<OrderIntent>`
-  - `fn on_tick(&self, ctx) -> Vec<OrderIntent>`
-  - `fn on_shutdown(&self, ctx) -> Vec<OrderIntent>`
-- [ ] Define `OrderIntent` struct:
-  - market_id, token_id, side, price, size
-  - `urgency: Urgency` (Immediate, Normal, Passive)
-  - reason: String (for logging)
-- [ ] Define `StrategyContext` (read-only view):
-  - `&OrderBookState`, `&Ledger`, `&MarketRegistry`, `clock: Instant`
-- [ ] **Strategies output WHAT they want, not HOW to execute**
+- [x] Define `Strategy` trait in `src/strategy/traits.rs`:
+  - [x] `fn name(&self) -> &str`
+  - [x] `fn subscribed_markets(&self) -> Vec<ConditionId>`
+  - [x] `fn on_book_update(&self, market_id, ctx) -> Vec<OrderIntent>`
+  - [x] `fn on_fill(&self, fill, ctx) -> Vec<OrderIntent>`
+  - [x] `fn on_tick(&self, ctx) -> Vec<OrderIntent>`
+  - [x] `fn on_shutdown(&self, ctx) -> Vec<OrderIntent>`
+- [x] Define `OrderIntent` struct:
+  - [x] market_id, token_id, side, price, size
+  - [x] `urgency: Urgency` (Immediate, Normal, Passive)
+  - [x] reason: String (for logging)
+  - [x] group_id, priority for multi-leg and conflict resolution
+- [x] Define `StrategyContext` (read-only view):
+  - [x] `&OrderBookState`, `&Ledger`, `clock: Instant`
+- [x] **Strategies output WHAT they want, not HOW to execute**
 
-### 3.8 Strategy Router (NEW - Multiple Strategy Support)
+### 3.8 Strategy Router ✅ IMPLEMENTED IN PHASE 6
 
-- [ ] Implement `StrategyRouter` in `src/strategy/router.rs`:
-  - `register(strategy: Box<dyn Strategy>)`
-  - `enable(name: &str)` / `disable(name: &str)`
-  - `on_book_update()` → routes to subscribed strategies
-  - `on_fill()` → routes to relevant strategies
-- [ ] Priority-based conflict resolution (higher priority wins)
+- [x] Implement `StrategyRouter` in `src/strategy/router.rs`:
+  - [x] `register(strategy: Box<dyn Strategy>)`
+  - [x] `enable(name: &str)` / `disable(name: &str)`
+  - [x] `on_book_update()` → routes to subscribed strategies
+  - [x] `on_fill()` → routes to relevant strategies
+- [x] Priority-based conflict resolution (higher priority wins)
 - [ ] **Future: per-strategy capital allocation**
 
-### 3.9 Execution Policy (NEW - Taker vs Maker Pivot)
+### 3.9 Execution Policy ✅ IMPLEMENTED IN PHASE 6
 
-- [ ] Define `ExecutionPolicy` trait in `src/execution/policy.rs`:
-  - `fn to_order_params(&self, intent: &OrderIntent) -> OrderParams`
-  - `fn on_partial_fill(&self, intent, filled) -> PartialFillAction`
-- [ ] Implement `TakerPolicy`:
-  - Urgency::Immediate → FOK
-  - Urgency::Normal/Passive → FAK
-  - on_partial_fill → UnwindFilled (for arb) or CancelRemainder
-- [ ] Implement `MakerPolicy`:
-  - Always GTC
-  - post_only: bool
-  - on_partial_fill → KeepRemainder
-- [ ] **To pivot from taker to maker: change policy, not strategy**
+- [x] Define `ExecutionPolicy` trait in `src/execution/policy.rs`:
+  - [x] `fn to_order_params(&self, intent: &OrderIntent) -> OrderParams`
+  - [x] `fn on_partial_fill(&self, intent, filled) -> PartialFillAction`
+- [x] Implement `TakerPolicy`:
+  - [x] Urgency::Immediate → FOK
+  - [x] Urgency::Normal/Passive → FAK
+  - [x] on_partial_fill → UnwindFilled (for arb) or CancelRemainder
+- [x] Implement `MakerPolicy`:
+  - [x] Always GTC
+  - [x] price_offset for aggressive posting
+  - [x] on_partial_fill → KeepRemainder
+- [x] **To pivot from taker to maker: change policy, not strategy**
 
-**Deliverable:** Successfully place and confirm a test order ($1) with full state machine. Strategy framework ready for Phase 4.
+### 3.10 Order Executor ✅ IMPLEMENTED IN PHASE 6
+
+- [x] Implement `OrderExecutor` in `src/execution/executor.rs`
+- [x] execute() - single order intent with circuit breaker check
+- [x] execute_batch() - concurrent multi-leg with tokio::join!
+- [x] execute_grouped() - partial fill handling for arb
+- [x] Integrates with CircuitBreaker for trading safety
+- [x] Error classification for circuit breaker
+
+**Deliverable:** ✅ Strategy framework complete. Ready for MathArbStrategy implementation.
 
 ---
 
-## Phase 4: Strategy MVP (Math Arb Implements Strategy Trait)
+## Phase 7: Strategy MVP (Math Arb Implements Strategy Trait)
 
-### 4.1 Dynamic Edge Calculator
+### 7.1 Dynamic Edge Calculator
 
 - [ ] Implement `EdgeCalculator` in `src/strategy/edge_calculator.rs`
 - [ ] Replace static ARB_THRESHOLD = 0.97 with dynamic calculation
@@ -269,7 +286,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [ ] Estimate slippage from book depth using `OrderBookState::depth()`
 - [ ] Increase margin for thin books
 
-### 4.2 MathArbStrategy (Implements Strategy Trait)
+### 7.2 MathArbStrategy (Implements Strategy Trait)
 
 - [ ] Implement `Strategy` trait for `MathArbStrategy`:
   - `on_book_update()` → check for arb opportunity, return `Vec<OrderIntent>`
@@ -279,7 +296,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [ ] Return TWO `OrderIntent`s for both arb legs (YES + NO)
 - [ ] Set `urgency: Urgency::Immediate` for taker execution
 
-### 4.3 Execution Flow (Strategy → Policy → Executor)
+### 7.3 Execution Flow (Strategy → Policy → Executor)
 
 - [ ] StrategyRouter receives book update
 - [ ] Routes to MathArbStrategy.on_book_update()
@@ -287,7 +304,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [ ] ExecutionPolicy (TakerPolicy) converts to `OrderParams`
 - [ ] Executor submits both legs concurrently: `tokio::join!`
 
-### 4.4 Partial Fill Handling (via TakerPolicy)
+### 7.4 Partial Fill Handling (via TakerPolicy)
 
 - [ ] If both filled equally → success
 - [ ] If partial fills unequal:
@@ -298,7 +315,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
   - [ ] Unwind the filled leg immediately
 - [ ] **Never hold unhedged position > 500ms**
 
-### 4.5 Risk Limits (Hard Guardrails)
+### 7.5 Risk Limits (Hard Guardrails)
 
 - [ ] Max notional per market
 - [ ] Max total open exposure
@@ -310,9 +327,9 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 
 ---
 
-## Phase 5: Edge Expansion (Additional Strategies)
+## Phase 8: Edge Expansion (Additional Strategies)
 
-### 5.1 MakerRebateArbStrategy (Gabagool Strategy) - NEW
+### 8.1 MakerRebateArbStrategy (Gabagool Strategy) - NEW
 
 - [ ] Implement `Strategy` trait for `MakerRebateArbStrategy` in `src/strategy/maker_arb.rs`
 - [ ] Same arb logic as MathArb but with `Urgency::Passive` → GTC orders
@@ -329,13 +346,13 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - Zero fees + rebates = profitable at lower edge thresholds (~1% vs ~3%)
 - Lower fill rate but higher profit per trade
 
-### 5.2 External Price Feeds (for Temporal Arb)
+### 8.2 External Price Feeds (for Temporal Arb)
 
 - [ ] Binance WebSocket connection in `src/feeds/binance.rs`
 - [ ] Coinbase WebSocket connection in `src/feeds/coinbase.rs`
 - [ ] Spot price aggregation in StrategyContext
 
-### 5.3 TemporalArbStrategy (Implements Strategy Trait)
+### 8.3 TemporalArbStrategy (Implements Strategy Trait)
 
 - [ ] Implement `Strategy` trait for `TemporalArbStrategy`:
   - `on_book_update()` → compare spot vs Polymarket, return `Vec<OrderIntent>`

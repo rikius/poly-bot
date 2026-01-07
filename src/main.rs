@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
     // Token IDs to subscribe to
     // TODO: This should come from config or market discovery in Phase 3+
     let token_ids = vec![
-        "64216051096597192974559951503874795452539828700419399952430572386874662003148".to_string(),
+        "64986247965097996772831537643009827603725247167544326381399260962871892136792".to_string(),
     ];
 
     // Create and run the bot
