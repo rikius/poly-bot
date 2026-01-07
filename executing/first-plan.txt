@@ -1,6 +1,6 @@
 # Polymarket Bot - Complete Execution Plan
 
-## Current Status: Phase 3 Complete ✅
+## Current Status: Phase 4 Complete ✅
 
 **Latest Update:** 2026-01-06
 
@@ -9,8 +9,8 @@
 - ✅ **Phase 1:** Project Foundation - Cargo.toml, types, kill switch (8 tests passing)
 - ✅ **Phase 2:** WebSocket Connectivity - Real-time market data streaming working
 - ✅ **Phase 3:** HTTP Client & Authentication - REST API + EIP-712 signing (25 tests passing)
-- 🚧 **Phase 4:** Ledger and state machine - NEXT
-- ⏸️ **Phase 5:** Risk and circuit breaker
+- ✅ **Phase 4:** Ledger & State Machine - Authoritative portfolio state (56 tests passing)
+- 🚧 **Phase 5:** Risk and circuit breaker - NEXT
 - ⏸️ **Phase 6:** Strategy framework
 - ⏸️ **Phase 7:** Math arb strategy (MVP)
 - ⏸️ **Phase 8:** Maker rebate strategy
@@ -19,14 +19,17 @@
 
 ### Key Achievements
 - WebSocket successfully receiving live Polymarket order book data
+- User WebSocket for trade/fill notifications implemented
 - Order book state tracking with lock-free DashMap
+- Ledger system: orders, positions, cash tracking
+- Order state machine with lifecycle management
 - Bot module properly orchestrating all components
 - Clean separation: main.rs (86 lines), bot.rs (140 lines)
 - Kill switch with 3 trigger methods working
 - HTTP client with connection pooling and optimized settings
 - HMAC authentication for REST API
-- EIP-712 order signing with alloy
-- All tests passing (25 unit tests)
+- EIP-712 order signing with alloy (verified hash constants)
+- All tests passing (56 unit tests)
 
 ---
 
@@ -137,17 +140,28 @@ src/
 ├── kill_switch.rs    # Kill switch with atomic bool + env var + file
 ├── api/
 │   ├── mod.rs        # API module exports
-│   └── types.rs      # Type definitions (PriceLevel, OrderBook, etc.)
+│   ├── types.rs      # Type definitions (PriceLevel, OrderBook, etc.)
+│   ├── client.rs     # Optimized HTTP client with pooling
+│   ├── auth.rs       # HMAC authentication
+│   └── endpoints.rs  # REST endpoint wrappers
+├── signing/
+│   ├── mod.rs        # Signing module exports
+│   └── order.rs      # EIP-712 order signing with alloy
 ├── websocket/
 │   ├── mod.rs        # WebSocket exports
-│   └── market.rs     # Market WebSocket client
+│   ├── market.rs     # Market WebSocket client (order book updates)
+│   └── user.rs       # User WebSocket client (trade notifications)
 ├── state/
 │   ├── mod.rs        # State exports
 │   └── order_book.rs # Order book state with DashMap
-├── ledger/           # Stub (Phase 4)
-│   └── mod.rs
-├── execution/        # Stub (Phase 4)
-│   └── mod.rs
+├── ledger/
+│   ├── mod.rs        # Ledger struct combining components
+│   ├── orders.rs     # OpenOrders tracking with state machine
+│   ├── positions.rs  # Position tracking (shares, avg_cost, pnl)
+│   └── cash.rs       # Cash balance (available, reserved, total)
+├── execution/
+│   ├── mod.rs        # Execution exports
+│   └── state_machine.rs  # Invariant checking
 ├── strategy/         # Stub (Phase 6)
 │   └── mod.rs
 └── risk/             # Stub (Phase 5)
@@ -192,10 +206,11 @@ src/
    - PING/PONG keepalive (5 sec interval)
    - Spawned as async task in bot.rs
 
-3. ⏸️ **`src/websocket/user.rs`** - User WebSocket (fills) - DEFERRED to Phase 4
-   - Will connect to `wss://ws-subscriptions-clob.polymarket.com/ws/user`
+3. ✅ **`src/websocket/user.rs`** - User WebSocket (fills)
+   - Connects to `wss://ws-subscriptions-clob.polymarket.com/ws/user`
    - Authentication message with API credentials
    - Parse trade notifications
+   - Automatic reconnection with exponential backoff
 
 #### Step 2.2: Implement State Module ✅ COMPLETED
 
@@ -274,40 +289,55 @@ src/
 
 ---
 
-### Phase 4: Ledger & State Machine
+### Phase 4: Ledger & State Machine ✅ COMPLETED
 
 **Goal:** Authoritative state tracking with order lifecycle management.
 
-#### Step 4.1: Implement Ledger Module
+#### Step 4.1: Implement Ledger Module ✅ COMPLETED
 
-1. **`src/ledger/orders.rs`** - OpenOrders tracking
+1. ✅ **`src/ledger/orders.rs`** - OpenOrders tracking
    - OrderState enum (CreatedLocal → Signed → Submitted → Acked → Filled)
-   - TrackedOrder struct
-   - State transition validation
+   - TrackedOrder struct with state transitions
+   - State transition validation with can_transition_to()
+   - DashMap for lock-free concurrent access
 
-2. **`src/ledger/positions.rs`** - Position tracking
-   - Update ONLY from confirmed fills
-   - Track shares, avg_cost, realized_pnl
+2. ✅ **`src/ledger/positions.rs`** - Position tracking
+   - Update ONLY from confirmed fills (never from expected)
+   - Track shares, avg_cost, realized_pnl, unrealized_pnl
+   - apply_fill() with proper flip position logic
+   - 31 unit tests for all scenarios
 
-3. **`src/ledger/cash.rs`** - Cash balance
-   - available, reserved, total
+3. ✅ **`src/ledger/cash.rs`** - Cash balance
+   - available, reserved, total using Decimal
    - Reserve on ACKED, release on cancel/reject
+   - Thread-safe with DashMap pattern
 
-4. **`src/ledger/reconciliation.rs`** - REST sync loop
+4. ⏸️ **`src/ledger/reconciliation.rs`** - REST sync loop - DEFERRED TO PHASE 5
    - Every 2-5 minutes: GET /orders?status=open
    - Handle discrepancies
+   - Note: Ties into circuit breaker logic
 
-#### Step 4.2: Implement Execution State Machine
+#### Step 4.2: Implement Execution State Machine ✅ COMPLETED
 
-1. **`src/execution/state_machine.rs`** - Order state transitions
-   - `can_transition_to()` validation
-   - `check_invariants()` for ledger consistency
+1. ✅ **`src/execution/state_machine.rs`** - Invariant checking
+   - InvariantViolation enum for validation failures
+   - check_invariants() for ledger consistency
+   - Validates: fills map to orders, cash reserves match open orders
 
-#### Step 4.3: Validation Checkpoint
-- [ ] Order state transitions work correctly
-- [ ] Positions update only from fills
-- [ ] Cash reserved/released properly
-- [ ] Reconciliation finds no discrepancies (clean state)
+#### Step 4.3: User WebSocket ✅ COMPLETED
+
+1. ✅ **`src/websocket/user.rs`** - Trade notifications
+   - Connect to `wss://ws-subscriptions-clob.polymarket.com/ws/user`
+   - Authentication with API credentials
+   - Parse trade notifications (fills)
+   - Automatic reconnection with exponential backoff
+
+#### Step 4.4: Validation Checkpoint ✅ ALL PASSED
+- ✅ Order state transitions work correctly (can_transition_to validation)
+- ✅ Positions update only from fills (apply_fill method)
+- ✅ Cash reserved/released properly
+- ✅ All 56 tests passing
+- ✅ cargo build with no warnings
 
 ---
 

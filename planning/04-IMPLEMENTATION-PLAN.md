@@ -1,24 +1,31 @@
 # Polymarket Bot - Master Implementation Plan
+
 ## Rust High-Frequency Trading Bot
 
 ---
 
-## 🚀 Current Status: Phase 2 Complete (Updated: 2026-01-06)
+## 🚀 Current Status: Phase 4 Complete (Updated: 2026-01-06)
 
 ### ✅ Completed Phases
+
 - **Phase 0:** Wallet Setup - Trading wallet funded with API credentials
 - **Phase 1:** Foundation + Safety - Project structure, types, kill switch (8 tests ✅)
 - **Phase 2:** WebSocket + State - Live market data streaming working
+- **Phase 3:** HTTP Client & Authentication - REST API + EIP-712 signing (25 tests ✅)
+- **Phase 4:** Ledger & State Machine - Authoritative portfolio state tracking (56 tests ✅)
 
 ### 🚧 In Progress
-- **Phase 3:** HTTP Client & Authentication - NEXT
+
+- **Phase 5:** Risk & Circuit Breaker - NEXT
 
 ### 📊 Metrics
-- **Tests Passing:** 8/8 unit tests
+
+- **Tests Passing:** 56/56 unit tests
 - **Build Time:** ~2s
-- **WebSocket:** Connected and streaming live data
+- **WebSocket:** Market data + User fills streaming
 - **Order Book:** Tracking markets with lock-free DashMap
-- **Code Quality:** Clean module separation (main.rs: 86 lines, bot.rs: 140 lines)
+- **Ledger:** Orders, Positions, Cash tracking with DashMap
+- **Code Quality:** Clean module separation
 
 ---
 
@@ -43,6 +50,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 ## Phase 1: Foundation + Safety ✅ COMPLETED
 
 ### 1.1 Project Setup ✅
+
 - [x] Initialize Cargo project with workspace structure
 - [x] Configure Cargo.toml with optimized dependencies (alloy v1.x, simd-json, etc.)
 - [x] Set up release profile (LTO, single codegen unit, opt-level 3)
@@ -50,6 +58,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [x] Add performance dependencies: simd-json, rust_decimal, dashmap
 
 ### 1.2 Configuration Management ✅
+
 - [x] Environment variables via dotenvy
 - [x] Config file support (reading from .env)
 - [x] Secrets management (private keys, API keys loaded securely)
@@ -57,6 +66,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [x] **Private keys and signatures not logged**
 
 ### 1.3 Core Types ✅
+
 - [x] Define all API types (ConditionId, TokenId, Side, OrderType, PriceLevel, etc.)
 - [x] Implement serialization with serde
 - [x] Add validation traits (OperatingMode, ErrorType classification)
@@ -65,6 +75,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [x] Module structure created (api/types.rs)
 
 ### 1.4 Kill Switch ✅
+
 - [x] Implement KillSwitch struct with atomic bool
 - [x] Check env var `POLYBOT_KILL` on every loop iteration
 - [x] Check file `/tmp/polybot_kill` existence
@@ -77,6 +88,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 **Deliverable:** ✅ Compilable project skeleton with types and working kill switch
 
 ### 1.5 Bot Orchestration Module ✅ (Added during refactor)
+
 - [x] Created src/bot.rs (140 lines) for component coordination
 - [x] Simplified main.rs to just initialization (86 lines)
 - [x] Clean separation of concerns
@@ -87,6 +99,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 ## Phase 2: Connectivity + State ✅ PARTIALLY COMPLETED
 
 ### 2.1 Market WebSocket (Order Books) ✅
+
 - [x] Connect to `wss://ws-subscriptions-clob.polymarket.com/ws/market`
 - [x] Implement subscription message `{"type": "market", "assets_ids": [...]}`
 - [x] Parse order book updates with flexible JSON parsing (serde_json::Value)
@@ -96,6 +109,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - ⏸️ **Track WS connection state for circuit breaker** (deferred to Phase 5)
 
 ### 2.2 Order Book State ✅
+
 - [x] Created OrderBookState with DashMap (lock-free)
 - [x] Implemented best_bid(), best_ask(), mid_price(), spread()
 - [x] Implemented spread_bps() for basis point calculation
@@ -104,25 +118,30 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [x] 3 unit tests (all passing)
 - [x] Integrated into bot.rs event loop
 
-### 2.3 User WebSocket (Trade Notifications) ⏸️ DEFERRED TO PHASE 4
-- [ ] Connect to `wss://ws-subscriptions-clob.polymarket.com/ws/user`
-- [ ] Implement authentication message
-- [ ] Parse trade notifications (fills)
-- [ ] **This is the PRIMARY source for position updates**
-- [ ] Track order status updates
+### 2.3 User WebSocket (Trade Notifications) ✅ COMPLETED IN PHASE 4
 
-### 2.4 Ledger System (Authoritative State) ⏸️ DEFERRED TO PHASE 4
-- [ ] **OpenOrders:** order_id → metadata + status (state machine)
-- [ ] **Fills:** trade_id → fill record (immutable log)
-- [ ] **Positions:** token_id → shares, avg cost, realized P&L
-- [ ] **Cash:** available, reserved, total USDC
+- [x] Connect to `wss://ws-subscriptions-clob.polymarket.com/ws/user`
+- [x] Implement authentication message
+- [x] Parse trade notifications (fills)
+- [x] **This is the PRIMARY source for position updates**
+- [x] Track order status updates
 
-### 2.5 Reconciliation Loop ⏸️ DEFERRED TO PHASE 4
+### 2.4 Ledger System (Authoritative State) ✅ COMPLETED IN PHASE 4
+
+- [x] **OpenOrders:** order_id → metadata + status (state machine)
+- [x] **Fills:** trade_id → fill record (immutable log)
+- [x] **Positions:** token_id → shares, avg cost, realized P&L
+- [x] **Cash:** available, reserved, total USDC
+
+### 2.5 Reconciliation Loop ⏸️ DEFERRED TO PHASE 5
+
 - [ ] Every 2-5 minutes: GET /orders?status=open
 - [ ] Cross-check with local OpenOrders
 - [ ] Handle discrepancies
+- Note: Deferred to Phase 5 (Risk) as it ties into circuit breaker logic
 
-### 2.6 Market Registry ⏸️ DEFERRED TO PHASE 3
+### 2.6 Market Registry ⏸️ DEFERRED TO PHASE 5
+
 - [ ] Fetch markets list from REST API
 - [ ] Build mapping: condition_id → {yes_token_id, no_token_id}
 - [ ] Validate binary vs multi-outcome
@@ -135,6 +154,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 ## Phase 3: Execution Engine + Strategy Framework
 
 ### 3.1 Order State Machine
+
 - [ ] Implement OrderState enum:
   - CreatedLocal → Signed → Submitted → Acked
   - Acked → PartiallyFilled → Filled
@@ -145,6 +165,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [ ] Emit events on state changes for logging
 
 ### 3.2 HTTP Client (with Rate Limiting)
+
 - [ ] Optimized reqwest client (HTTP/2, pooling, TCP_NODELAY)
 - [ ] Connection pooling: 5-20 persistent connections per host
 - [ ] HTTP/2 stream windows: 512KB initial stream, 1MB connection window
@@ -154,6 +175,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [ ] **Track reject rate for circuit breaker**
 
 ### 3.3 Order Signing
+
 - [ ] Private key loading (secure, never log)
 - [ ] Derive signer/maker addresses
 - [ ] EIP-712 domain separator + struct hash
@@ -161,23 +183,26 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [ ] Verify signatures locally before sending
 
 ### 3.4 Order Submission
+
 - [ ] POST /order endpoint
 - [ ] Transition state: Signed → Submitted → Acked/Rejected
 - [ ] Handle error responses
 - [ ] **Record rejects for circuit breaker**
 
 ### 3.5 Order Management
+
 - [ ] Cancel order: DELETE /order/{id}
 - [ ] Transition: Acked → CancelPending → Cancelled
 - [ ] Cancel-all helper for shutdown
 
 ### 3.6 Circuit Breaker
+
 - [ ] Track reject count and rate
 - [ ] States: Closed (normal) → Open (paused) → HalfOpen (testing)
 - [ ] Implement `ErrorType` classification (see 02-RUST-ARCHITECTURE.md):
   - [ ] `Retryable`: ORDER_DELAYED, MARKET_NOT_READY (don't count toward threshold)
   - [ ] `Expected`: FOK_ORDER_NOT_FILLED_ERROR (don't count toward threshold)
-  - [ ] `Fatal`: All INVALID_ORDER_*, EXECUTION_ERROR, auth errors (count toward threshold)
+  - [ ] `Fatal`: All INVALID*ORDER*\*, EXECUTION_ERROR, auth errors (count toward threshold)
 - [ ] Open circuit on:
   - [ ] WebSocket disconnected
   - [ ] Reconciliation failure
@@ -187,6 +212,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [ ] **Check market.accepting_orders before submitting orders**
 
 ### 3.7 Strategy Trait + OrderIntent (NEW - Pivot Architecture)
+
 - [ ] Define `Strategy` trait in `src/strategy/traits.rs`:
   - `fn name(&self) -> &str`
   - `fn subscribed_markets(&self) -> Vec<ConditionId>`
@@ -203,6 +229,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [ ] **Strategies output WHAT they want, not HOW to execute**
 
 ### 3.8 Strategy Router (NEW - Multiple Strategy Support)
+
 - [ ] Implement `StrategyRouter` in `src/strategy/router.rs`:
   - `register(strategy: Box<dyn Strategy>)`
   - `enable(name: &str)` / `disable(name: &str)`
@@ -212,6 +239,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [ ] **Future: per-strategy capital allocation**
 
 ### 3.9 Execution Policy (NEW - Taker vs Maker Pivot)
+
 - [ ] Define `ExecutionPolicy` trait in `src/execution/policy.rs`:
   - `fn to_order_params(&self, intent: &OrderIntent) -> OrderParams`
   - `fn on_partial_fill(&self, intent, filled) -> PartialFillAction`
@@ -232,6 +260,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 ## Phase 4: Strategy MVP (Math Arb Implements Strategy Trait)
 
 ### 4.1 Dynamic Edge Calculator
+
 - [ ] Implement `EdgeCalculator` in `src/strategy/edge_calculator.rs`
 - [ ] Replace static ARB_THRESHOLD = 0.97 with dynamic calculation
 - [ ] `required_edge = fees + slippage + partial_fill_risk + spread_penalty`
@@ -239,6 +268,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [ ] Increase margin for thin books
 
 ### 4.2 MathArbStrategy (Implements Strategy Trait)
+
 - [ ] Implement `Strategy` trait for `MathArbStrategy`:
   - `on_book_update()` → check for arb opportunity, return `Vec<OrderIntent>`
   - Uses `ctx.books.best_ask()` primitives (NOT check_arbitrage)
@@ -248,6 +278,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [ ] Set `urgency: Urgency::Immediate` for taker execution
 
 ### 4.3 Execution Flow (Strategy → Policy → Executor)
+
 - [ ] StrategyRouter receives book update
 - [ ] Routes to MathArbStrategy.on_book_update()
 - [ ] Strategy returns `Vec<OrderIntent>`
@@ -255,6 +286,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [ ] Executor submits both legs concurrently: `tokio::join!`
 
 ### 4.4 Partial Fill Handling (via TakerPolicy)
+
 - [ ] If both filled equally → success
 - [ ] If partial fills unequal:
   - [ ] `TakerPolicy::on_partial_fill()` returns `UnwindFilled`
@@ -265,6 +297,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [ ] **Never hold unhedged position > 500ms**
 
 ### 4.5 Risk Limits (Hard Guardrails)
+
 - [ ] Max notional per market
 - [ ] Max total open exposure
 - [ ] Max outstanding orders (e.g., 10)
@@ -278,6 +311,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 ## Phase 5: Edge Expansion (Additional Strategies)
 
 ### 5.1 MakerRebateArbStrategy (Gabagool Strategy) - NEW
+
 - [ ] Implement `Strategy` trait for `MakerRebateArbStrategy` in `src/strategy/maker_arb.rs`
 - [ ] Same arb logic as MathArb but with `Urgency::Passive` → GTC orders
 - [ ] Filter to 15-min crypto markets only (where rebates apply)
@@ -287,17 +321,20 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [ ] Test alongside MathArbStrategy (both can run simultaneously)
 
 **Key Implementation Notes:**
+
 - Uses existing `MakerPolicy` infrastructure
 - Posts limit orders slightly inside spread to increase fill probability
 - Zero fees + rebates = profitable at lower edge thresholds (~1% vs ~3%)
 - Lower fill rate but higher profit per trade
 
 ### 5.2 External Price Feeds (for Temporal Arb)
+
 - [ ] Binance WebSocket connection in `src/feeds/binance.rs`
 - [ ] Coinbase WebSocket connection in `src/feeds/coinbase.rs`
 - [ ] Spot price aggregation in StrategyContext
 
 ### 5.3 TemporalArbStrategy (Implements Strategy Trait)
+
 - [ ] Implement `Strategy` trait for `TemporalArbStrategy`:
   - `on_book_update()` → compare spot vs Polymarket, return `Vec<OrderIntent>`
   - `on_tick()` → check for time-based exits
@@ -307,6 +344,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [ ] Time-based position exit via `on_tick()`
 
 ### 5.4 SpreadCaptureStrategy (Implements Strategy Trait)
+
 - [ ] Implement `Strategy` trait for `SpreadCaptureStrategy`:
   - `on_book_update()` → detect spread dislocation, return `Vec<OrderIntent>`
 - [ ] Delta-neutral position building
@@ -314,11 +352,13 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [ ] Can use `MakerPolicy` for passive liquidity provision
 
 ### 5.5 Market Selection Scoring
+
 - [ ] Score markets by liquidity, spread, volatility
 - [ ] Use `MarketFilter` capabilities for filtering
 - [ ] Strategy subscribes dynamically via `subscribed_markets()`
 
 ### 5.6 Strategy Hot-Swap Support
+
 - [ ] Enable/disable strategies at runtime via `StrategyRouter::enable/disable`
 - [ ] Graceful strategy shutdown: call `strategy.on_shutdown()` before disabling
 - [ ] **Future: per-strategy capital allocation and risk limits**
@@ -330,6 +370,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 ## Phase 6: Monitoring & Observability
 
 ### 6.1 Latency Instrumentation
+
 - [ ] Log timestamps for critical path:
   - [ ] WS recv → parse done → book updated
   - [ ] opportunity detected → order signed → POST sent
@@ -338,6 +379,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [ ] Track "max in last 1 min"
 
 ### 6.2 Health Metrics
+
 - [ ] WS reconnect count
 - [ ] Missed sequence / resync events
 - [ ] Order reject count and rate
@@ -347,6 +389,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [ ] Reconciliation corrections count
 
 ### 6.3 Alerting
+
 - [ ] Discord/Telegram webhooks for:
   - [ ] Circuit breaker opened
   - [ ] Daily loss limit hit
@@ -360,12 +403,14 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 ## Phase 7: Deployment
 
 ### 7.1 VPS Deployment
+
 - [ ] Provision VPS (AWS us-east-1 recommended)
 - [ ] Apply kernel tuning (sysctl.conf)
 - [ ] Configure file descriptor limits
 - [ ] Set up systemd service with auto-restart
 
 ### 7.2 Testing Progression
+
 - [ ] Paper trading mode (log-only, no orders)
 - [ ] Small amount testing ($10-50)
 - [ ] Gradual size increase
@@ -380,11 +425,13 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 > **Do not start Phase 8 until Phases 1-6 are stable for at least 1 week.**
 
 ### 8.1 Latency Profiling
+
 - [ ] Instrument all critical paths
 - [ ] Identify actual bottlenecks (not assumed ones)
 - [ ] Optimize hot paths
 
 ### 8.2 Advanced Optimizations
+
 - [ ] Lock-free order queue (crossbeam)
 - [ ] io_uring for async I/O (Linux)
 - [ ] Memory pre-allocation tuning
@@ -396,44 +443,45 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 
 ## Implementation Priority Matrix (Updated for Pivot Architecture)
 
-| Component | Priority | Complexity | Dependencies | Phase |
-|-----------|----------|------------|--------------|-------|
-| Types/Config | P0 | Low | None | 1 |
-| **Kill Switch** | **P0** | Low | None | **1** |
-| Market WebSocket | P0 | Medium | Types | 2 |
-| **User WebSocket (Fills)** | **P0** | Medium | Types | **2** |
-| **Ledger System** | **P0** | High | Types | **2** |
-| **Reconciliation Loop** | **P0** | Medium | Ledger, HTTP | **2** |
-| **Market Registry (w/ Capabilities)** | **P0** | Medium | HTTP | **2** |
-| **Order State Machine** | **P0** | Medium | Ledger | **3** |
-| HTTP Client + Rate Limit | P0 | Medium | Types | 3 |
-| EIP-712 Signing | P0 | High | Types | 3 |
-| **Circuit Breaker** | **P0** | Medium | Rate Limit | **3** |
-| Order Submission | P0 | Medium | Signing, HTTP, State Machine | 3 |
-| **Strategy Trait + OrderIntent** | **P0** | Medium | State, Ledger | **3** |
-| **StrategyRouter** | **P0** | Medium | Strategy Trait | **3** |
-| **ExecutionPolicy (Taker/Maker)** | **P0** | Medium | OrderIntent | **3** |
-| **Dynamic Edge Calculator** | **P1** | Medium | OrderBookState | **4** |
-| **Partial Fill Handling** | **P1** | High | Ledger, ExecutionPolicy | **4** |
-| **MathArbStrategy** | **P1** | Medium | Strategy Trait, Edge Calc | **4** |
-| **MakerRebateArbStrategy** | **P1** | Low | Strategy Trait, MakerPolicy | **5** |
-| **TemporalArbStrategy** | **P2** | High | Strategy Trait, External feeds | **5** |
-| **SpreadCaptureStrategy** | **P2** | Medium | Strategy Trait, MakerPolicy | **5** |
-| **Latency Instrumentation** | P2 | Medium | All | **6** |
-| **Health Metrics** | P2 | Medium | All | **6** |
-| Monitoring/Alerting | P3 | Medium | All | 6 |
+| Component                             | Priority | Complexity | Dependencies                   | Phase |
+| ------------------------------------- | -------- | ---------- | ------------------------------ | ----- |
+| Types/Config                          | P0       | Low        | None                           | 1     |
+| **Kill Switch**                       | **P0**   | Low        | None                           | **1** |
+| Market WebSocket                      | P0       | Medium     | Types                          | 2     |
+| **User WebSocket (Fills)**            | **P0**   | Medium     | Types                          | **2** |
+| **Ledger System**                     | **P0**   | High       | Types                          | **2** |
+| **Reconciliation Loop**               | **P0**   | Medium     | Ledger, HTTP                   | **2** |
+| **Market Registry (w/ Capabilities)** | **P0**   | Medium     | HTTP                           | **2** |
+| **Order State Machine**               | **P0**   | Medium     | Ledger                         | **3** |
+| HTTP Client + Rate Limit              | P0       | Medium     | Types                          | 3     |
+| EIP-712 Signing                       | P0       | High       | Types                          | 3     |
+| **Circuit Breaker**                   | **P0**   | Medium     | Rate Limit                     | **3** |
+| Order Submission                      | P0       | Medium     | Signing, HTTP, State Machine   | 3     |
+| **Strategy Trait + OrderIntent**      | **P0**   | Medium     | State, Ledger                  | **3** |
+| **StrategyRouter**                    | **P0**   | Medium     | Strategy Trait                 | **3** |
+| **ExecutionPolicy (Taker/Maker)**     | **P0**   | Medium     | OrderIntent                    | **3** |
+| **Dynamic Edge Calculator**           | **P1**   | Medium     | OrderBookState                 | **4** |
+| **Partial Fill Handling**             | **P1**   | High       | Ledger, ExecutionPolicy        | **4** |
+| **MathArbStrategy**                   | **P1**   | Medium     | Strategy Trait, Edge Calc      | **4** |
+| **MakerRebateArbStrategy**            | **P1**   | Low        | Strategy Trait, MakerPolicy    | **5** |
+| **TemporalArbStrategy**               | **P2**   | High       | Strategy Trait, External feeds | **5** |
+| **SpreadCaptureStrategy**             | **P2**   | Medium     | Strategy Trait, MakerPolicy    | **5** |
+| **Latency Instrumentation**           | P2       | Medium     | All                            | **6** |
+| **Health Metrics**                    | P2       | Medium     | All                            | **6** |
+| Monitoring/Alerting                   | P3       | Medium     | All                            | 6     |
 
 **Bold items are from feedback integration and pivot architecture review.**
 
 ### Key Architecture Changes (Pivot Support)
-| Change | Purpose |
-|--------|---------|
-| `OrderBookState` exposes only primitives | Strategy logic decoupled from state |
-| `Strategy` trait with `on_book_update()` | Pluggable strategies, clean interface |
-| `OrderIntent` abstraction | Strategies declare WHAT, not HOW |
-| `ExecutionPolicy` (Taker/Maker) | Pivot execution mode without strategy rewrite |
-| `StrategyRouter` | Multiple concurrent strategies |
-| `MarketRegistry` with capabilities | Filter markets by kind, fees, timing |
+
+| Change                                   | Purpose                                       |
+| ---------------------------------------- | --------------------------------------------- |
+| `OrderBookState` exposes only primitives | Strategy logic decoupled from state           |
+| `Strategy` trait with `on_book_update()` | Pluggable strategies, clean interface         |
+| `OrderIntent` abstraction                | Strategies declare WHAT, not HOW              |
+| `ExecutionPolicy` (Taker/Maker)          | Pivot execution mode without strategy rewrite |
+| `StrategyRouter`                         | Multiple concurrent strategies                |
+| `MarketRegistry` with capabilities       | Filter markets by kind, fees, timing          |
 
 ---
 
@@ -745,17 +793,20 @@ pub const KILL_SWITCH_FILE: &str = "/tmp/polybot_kill";
 ## Testing Strategy
 
 ### Unit Tests
+
 - Type serialization/deserialization
 - Signature generation
 - Amount calculations
 - Arbitrage detection logic
 
 ### Integration Tests
+
 - WebSocket connection and subscription
 - Order placement (testnet or small amounts)
 - Full trade cycle
 
 ### Load Tests
+
 - Multi-market parallel scanning
 - Order throughput
 - Memory under sustained load
@@ -764,18 +815,18 @@ pub const KILL_SWITCH_FILE: &str = "/tmp/polybot_kill";
 
 ## Success Metrics
 
-| Metric | Target | Measurement |
-|--------|--------|-------------|
-| Total Latency | < 30ms | Timestamp at WS receive to POST sent |
-| Order Book Update | < 160µs | 1000 ops benchmark |
-| Spread Calculation | < 100ns | Single operation |
-| JSON Parsing (480KB) | < 2.5ms | simd-json benchmark |
-| Signing Time | < 5ms | Instrument alloy sign call |
-| HTTP POST | < 20ms | Request/response timing (warm connection) |
-| Uptime | > 99% | Monitoring |
-| Fill Rate | > 80% | Orders matched / orders sent |
-| Win Rate (Arb) | > 95% | Profitable trades / total |
-| Daily P&L | > $100 | Net after fees |
+| Metric               | Target  | Measurement                               |
+| -------------------- | ------- | ----------------------------------------- |
+| Total Latency        | < 30ms  | Timestamp at WS receive to POST sent      |
+| Order Book Update    | < 160µs | 1000 ops benchmark                        |
+| Spread Calculation   | < 100ns | Single operation                          |
+| JSON Parsing (480KB) | < 2.5ms | simd-json benchmark                       |
+| Signing Time         | < 5ms   | Instrument alloy sign call                |
+| HTTP POST            | < 20ms  | Request/response timing (warm connection) |
+| Uptime               | > 99%   | Monitoring                                |
+| Fill Rate            | > 80%   | Orders matched / orders sent              |
+| Win Rate (Arb)       | > 95%   | Profitable trades / total                 |
+| Daily P&L            | > $100  | Net after fees                            |
 
 ---
 
@@ -784,18 +835,21 @@ pub const KILL_SWITCH_FILE: &str = "/tmp/polybot_kill";
 Before going live, verify:
 
 ### Safety Systems (MUST PASS)
+
 - [ ] **Kill switch working** (test with env var AND file)
 - [ ] **Graceful shutdown cancels all orders**
 - [ ] **Circuit breaker triggers on high reject rate**
 - [ ] **Reconciliation loop running and finding no discrepancies**
 
 ### Security
+
 - [ ] Private key securely stored (not in code)
 - [ ] Private key/signatures never logged
 - [ ] API keys generated and tested
 - [ ] Using "trading key" with limited funds (operational separation)
 
 ### Trading Systems
+
 - [ ] USDC balance sufficient
 - [ ] Small test trades successful ($1-10)
 - [ ] **Partial fill handling tested** (manually trigger partial)
@@ -803,17 +857,20 @@ Before going live, verify:
 - [ ] **State machine transitions correct** (check logs)
 
 ### Risk Limits
+
 - [ ] Loss limits configured and tested
 - [ ] **Max open orders enforced**
 - [ ] **Max unhedged exposure enforced**
 - [ ] **Max daily loss stops trading**
 
 ### Monitoring
+
 - [ ] Monitoring alerts working
 - [ ] **Health metrics collecting**
 - [ ] **Latency p50/p95/p99 tracked**
 
 ### Infrastructure
+
 - [ ] VPS in us-east-1
 - [ ] Kernel tuning applied
 - [ ] systemd service with auto-restart
@@ -824,18 +881,22 @@ Before going live, verify:
 ## Resources
 
 ### Documentation
+
 - Polymarket Docs: https://docs.polymarket.com/
 - CLOB API: https://docs.polymarket.com/developers/CLOB/quickstart
 - ethers-rs: https://docs.rs/ethers/latest/ethers/
 
 ### Official SDKs
+
 - Rust: https://github.com/Polymarket/rs-clob-client
 - Python: https://github.com/Polymarket/py-clob-client
 
 ### High-Performance Reference
+
 - polyfill-rs: https://github.com/floor-licker/polyfill-rs (21.4% faster than official client)
 
 ### Planning Documents
+
 - `./01-STRATEGY-ANALYSIS.md` - Strategy details and metrics
 - `./02-RUST-ARCHITECTURE.md` - Technical architecture
 - `./03-API-REFERENCE.md` - Complete API reference
@@ -844,44 +905,44 @@ Before going live, verify:
 
 ## Key Dependency Changes Summary
 
-| Old | New | Reason |
-|-----|-----|--------|
-| ethers = "2.0" | alloy = "0.1" | Modern successor, better maintained |
-| reqwest = "0.11" | reqwest = "0.12" | HTTP/2 improvements |
-| f64 for prices | rust_decimal + macros | Fixed-point, integer-speed |
-| - | trust-dns-resolver | DNS caching (1-5ms savings) |
-| - | bytes | Buffer pooling, zero-alloc |
-| - | hyper = "1.0" | HTTP/2 stream window control |
-| - | governor | Rate limiting for API calls |
-| - | metrics + prometheus | Health metrics export |
-| - | hdrhistogram | Latency p50/p95/p99 tracking |
-| - | mockall | Testing with mocks |
+| Old              | New                   | Reason                              |
+| ---------------- | --------------------- | ----------------------------------- |
+| ethers = "2.0"   | alloy = "0.1"         | Modern successor, better maintained |
+| reqwest = "0.11" | reqwest = "0.12"      | HTTP/2 improvements                 |
+| f64 for prices   | rust_decimal + macros | Fixed-point, integer-speed          |
+| -                | trust-dns-resolver    | DNS caching (1-5ms savings)         |
+| -                | bytes                 | Buffer pooling, zero-alloc          |
+| -                | hyper = "1.0"         | HTTP/2 stream window control        |
+| -                | governor              | Rate limiting for API calls         |
+| -                | metrics + prometheus  | Health metrics export               |
+| -                | hdrhistogram          | Latency p50/p95/p99 tracking        |
+| -                | mockall               | Testing with mocks                  |
 
 ## New Components Summary (from feedback + pivot architecture)
 
-| Component | Purpose | Phase |
-|-----------|---------|-------|
-| **Kill Switch** | Emergency stop, graceful shutdown | 1 |
-| **Ledger System** | Authoritative state (orders, fills, positions, cash) | 2 |
-| **Reconciliation Loop** | REST sync every 2-5 min, find discrepancies | 2 |
-| **Market Registry (w/ Capabilities)** | Startup validation, tick/size rules, MarketKind/FeeModel/Timing | 2 |
-| **Order State Machine** | Explicit states + valid transitions | 3 |
-| **Circuit Breaker** | Pause trading on errors/rejects | 3 |
-| **Rate Limiter** | Cap API calls, backpressure | 3 |
-| **Strategy Trait** | Pluggable strategies, `on_book_update()` → `Vec<OrderIntent>` | 3 |
-| **OrderIntent** | Declare WHAT strategy wants (not HOW) | 3 |
-| **StrategyRouter** | Route events to multiple strategies, enable/disable | 3 |
-| **ExecutionPolicy** | Taker (FOK/FAK) vs Maker (GTC) conversion | 3 |
-| **TakerPolicy** | Immediate execution, unwind partials | 3 |
-| **MakerPolicy** | Passive liquidity, keep remainder | 3 |
-| **Dynamic Edge Calculator** | Replace static 0.97 threshold | 4 |
-| **Partial Fill Handler** | Unwind unhedged exposure via policy | 4 |
-| **MathArbStrategy** | Implements Strategy trait for arb | 4 |
-| **MakerRebateArbStrategy** | Same arb logic, Urgency::Passive for maker rebates | 5 |
-| **TemporalArbStrategy** | Implements Strategy trait for temporal arb | 5 |
-| **SpreadCaptureStrategy** | Implements Strategy trait for spread capture | 5 |
-| **Health Metrics** | WS reconnects, reject rate, fill ratio | 6 |
-| **Latency Instrumentation** | p50/p95/p99 for critical path | 6 |
+| Component                             | Purpose                                                         | Phase |
+| ------------------------------------- | --------------------------------------------------------------- | ----- |
+| **Kill Switch**                       | Emergency stop, graceful shutdown                               | 1     |
+| **Ledger System**                     | Authoritative state (orders, fills, positions, cash)            | 2     |
+| **Reconciliation Loop**               | REST sync every 2-5 min, find discrepancies                     | 2     |
+| **Market Registry (w/ Capabilities)** | Startup validation, tick/size rules, MarketKind/FeeModel/Timing | 2     |
+| **Order State Machine**               | Explicit states + valid transitions                             | 3     |
+| **Circuit Breaker**                   | Pause trading on errors/rejects                                 | 3     |
+| **Rate Limiter**                      | Cap API calls, backpressure                                     | 3     |
+| **Strategy Trait**                    | Pluggable strategies, `on_book_update()` → `Vec<OrderIntent>`   | 3     |
+| **OrderIntent**                       | Declare WHAT strategy wants (not HOW)                           | 3     |
+| **StrategyRouter**                    | Route events to multiple strategies, enable/disable             | 3     |
+| **ExecutionPolicy**                   | Taker (FOK/FAK) vs Maker (GTC) conversion                       | 3     |
+| **TakerPolicy**                       | Immediate execution, unwind partials                            | 3     |
+| **MakerPolicy**                       | Passive liquidity, keep remainder                               | 3     |
+| **Dynamic Edge Calculator**           | Replace static 0.97 threshold                                   | 4     |
+| **Partial Fill Handler**              | Unwind unhedged exposure via policy                             | 4     |
+| **MathArbStrategy**                   | Implements Strategy trait for arb                               | 4     |
+| **MakerRebateArbStrategy**            | Same arb logic, Urgency::Passive for maker rebates              | 5     |
+| **TemporalArbStrategy**               | Implements Strategy trait for temporal arb                      | 5     |
+| **SpreadCaptureStrategy**             | Implements Strategy trait for spread capture                    | 5     |
+| **Health Metrics**                    | WS reconnects, reject rate, fill ratio                          | 6     |
+| **Latency Instrumentation**           | p50/p95/p99 for critical path                                   | 6     |
 
 ## HTTP Client Optimization Summary
 

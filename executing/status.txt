@@ -247,25 +247,71 @@ What Was Built
   Ctrl+C
 
   ---
-  Next Steps: Phase 4 - Ledger & State Machine
+  Next Steps: Phase 5 - Risk Management
 
   What needs to be built:
-  1. src/ledger/orders.rs - OpenOrders tracking
-    - OrderState enum: CreatedLocal → Signed → Submitted → Acked → Filled
-    - TrackedOrder struct
-    - State transition validation
-  2. src/ledger/positions.rs - Position tracking
-    - Update ONLY from confirmed fills
-    - Track shares, avg_cost, realized_pnl
-  3. src/ledger/cash.rs - Cash balance
-    - available, reserved, total
-    - Reserve on ACKED, release on cancel/reject
-  4. src/ledger/reconciliation.rs - REST sync loop
+  1. src/risk/circuit_breaker.rs - Trading halt on repeated errors
+    - Track error counts by type
+    - Configurable thresholds
+  2. src/risk/limits.rs - Risk limits
+    - Max position size, max daily loss, etc.
+  3. src/ledger/reconciliation.rs - REST sync loop
     - Every 2-5 minutes: GET /orders?status=open
     - Handle discrepancies
+
+  ---
+  Phase 4: Ledger & State Machine ✅
+
+  Files Created:
+  1. src/ledger/orders.rs - OpenOrders tracking
+    - OrderState enum: CreatedLocal → Signed → Submitted → Acked → PartiallyFilled → Filled → CancelPending → Cancelled → Expired → Rejected → Unknown
+    - TrackedOrder struct with full order metadata
+    - State transition validation with valid_transitions()
+    - DashMap for concurrent access by order_id and client_order_id
+    - 4 unit tests (all passing)
+  2. src/ledger/positions.rs - Position tracking
+    - Position struct: token_id, shares, avg_cost, cost_basis, realized_pnl, unrealized_pnl, total_fees
+    - Update ONLY from confirmed fills (never expected)
+    - apply_fill() with proper handling for: open position, add to position, partial close, full close, flip position
+    - mark_all_to_market() for unrealized P&L calculation
+    - Fixed: Flip position logic (correctly detects sign change, not just absolute comparison)
+    - 6 unit tests (all passing)
+  3. src/ledger/cash.rs - Cash balance management
+    - CashBalance struct: available, reserved, total
+    - reserve() on order ACK, release() on cancel/reject
+    - settle_fill() for buy (reduce cash) and sell (increase cash)
+    - can_afford() for pre-trade checks
+    - 9 unit tests (all passing)
+  4. src/ledger/mod.rs - Ledger orchestration
+    - Ledger struct combining OpenOrders, Positions, CashBalance
+    - Fill struct for processing trade notifications
+    - process_fill() to update both positions and cash atomically
+    - LedgerSnapshot for state export
+    - 4 unit tests (all passing)
   5. src/execution/state_machine.rs - Order state transitions
-    - can_transition_to() validation
-    - check_invariants() for ledger consistency
+    - InvariantViolation enum: PositiveReservedWithNoOpenOrders, NegativeAvailableCash, ReservedCashMismatch, OrderWithNoReservedCash, OrphanFill
+    - check_invariants() validates ledger consistency
+    - validate_transition() for state machine correctness
+    - can_cancel(), requires_ack() helper functions
+    - Discrepancy enum for reconciliation
+    - 4 unit tests (all passing)
   6. src/websocket/user.rs - User WebSocket for fills
-    - Connect to wss://ws-subscriptions-clob.polymarket.com/ws/user
-    - Parse trade notifications
+    - UserWebSocket struct with API credentials
+    - UserMessage enum: Connected, Reconnecting, Trade, OrderUpdate
+    - TradeNotification with all fill fields
+    - OrderUpdate for order status changes
+    - Authentication with API key, secret, passphrase
+    - to_fill() conversion for ledger integration
+    - Automatic reconnection with exponential backoff
+    - 2 unit tests (all passing)
+
+  Updated Files:
+  1. src/websocket/mod.rs - Added user module export
+  2. src/execution/mod.rs - Added state_machine module with exports
+
+  Validation:
+  - ✅ cargo build succeeds (no warnings)
+  - ✅ cargo test passes (56 tests total, up from 25)
+  - ✅ Ledger correctly tracks orders, positions, cash
+  - ✅ State machine validates transitions
+  - ✅ Flip position logic fixed and tested
