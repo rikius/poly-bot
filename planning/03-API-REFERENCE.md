@@ -1,5 +1,17 @@
 # Polymarket CLOB API Reference
+
 ## Complete Implementation Guide for Rust Client
+
+---
+
+> ⚠️ **IMPORTANT UPDATE (2026-01-07):** Live API testing revealed several issues with response formats.
+> See `planning/05-API-DISCOVERY-FINDINGS.md` for critical fixes needed:
+>
+> - CLOB `/markets` returns wrapped `{ "data": [...] }` response
+> - CLOB `/market/{id}` returns 404 for 15-min crypto markets
+> - Fee endpoint returns `base_fee` not `fee_rate_bps`
+> - Gamma API uses stringified JSON for `outcomes` and `clobTokenIds`
+> - 15-min crypto markets use "Up"/"Down" not "Yes"/"No"
 
 ---
 
@@ -10,14 +22,18 @@
 **URL:** `wss://ws-subscriptions-clob.polymarket.com/ws/market`
 
 **Subscription Message:**
+
 ```json
 {
-  "assets_ids": ["9116770648672617954873502150906669109632013173266181691206825621739241400461"],
+  "assets_ids": [
+    "9116770648672617954873502150906669109632013173266181691206825621739241400461"
+  ],
   "type": "market"
 }
 ```
 
 **Order Book Response:**
+
 ```json
 {
   "market": "0x2e94bb8dd09931d12e6e656fe4fe6ceb3922bc3d6eab864bb6cd24773cf67269",
@@ -25,12 +41,12 @@
   "timestamp": "1767642862089",
   "hash": "86cc81dbf4d5aef952e924a78cf51556b4ca6af5",
   "bids": [
-    {"price": "0.01", "size": "1027313.8"},
-    {"price": "0.02", "size": "129350.81"}
+    { "price": "0.01", "size": "1027313.8" },
+    { "price": "0.02", "size": "129350.81" }
   ],
   "asks": [
-    {"price": "0.99", "size": "1979.07"},
-    {"price": "0.98", "size": "3500"}
+    { "price": "0.99", "size": "1979.07" },
+    { "price": "0.98", "size": "3500" }
   ],
   "event_type": "book",
   "last_trade_price": "0.330"
@@ -44,6 +60,7 @@
 **URL:** `wss://ws-subscriptions-clob.polymarket.com/ws/user`
 
 **Authentication Message (send immediately after connect):**
+
 ```json
 {
   "auth": {
@@ -57,6 +74,7 @@
 ```
 
 **Trade Notification:**
+
 ```json
 {
   "type": "TRADE",
@@ -104,6 +122,7 @@
 **URL:** `wss://ws-live-data.polymarket.com/`
 
 **Subscription Message:**
+
 ```json
 {
   "action": "subscribe",
@@ -118,6 +137,7 @@
 ```
 
 **Activity Response:**
+
 ```json
 {
   "connection_id": "WuiFwd4ULPECH7A=",
@@ -150,24 +170,24 @@
 
 ### Public Endpoints (No Auth Required)
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/markets` | List all markets |
-| GET | `/market/{id}` | Get specific market |
-| GET | `/price` | Get current price |
-| GET | `/book` | Get order book |
-| GET | `/midpoint` | Get midpoint price |
-| GET | `/trades` | Get trade history |
-| GET | `/time` | Server time (for connection warming) |
+| Method | Endpoint       | Description                          |
+| ------ | -------------- | ------------------------------------ |
+| GET    | `/markets`     | List all markets                     |
+| GET    | `/market/{id}` | Get specific market                  |
+| GET    | `/price`       | Get current price                    |
+| GET    | `/book`        | Get order book                       |
+| GET    | `/midpoint`    | Get midpoint price                   |
+| GET    | `/trades`      | Get trade history                    |
+| GET    | `/time`        | Server time (for connection warming) |
 
 ### Authenticated Endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/orders` | Get your open orders |
-| POST | `/order` | Place an order |
-| DELETE | `/order/{id}` | Cancel an order |
-| GET | `/notifications` | Get trade notifications |
+| Method | Endpoint         | Description             |
+| ------ | ---------------- | ----------------------- |
+| GET    | `/orders`        | Get your open orders    |
+| POST   | `/order`         | Place an order          |
+| DELETE | `/order/{id}`    | Cancel an order         |
+| GET    | `/notifications` | Get trade notifications |
 
 ---
 
@@ -175,13 +195,13 @@
 
 All authenticated requests require these headers:
 
-| Header | Format | Example |
-|--------|--------|---------|
-| `poly_address` | 0x + 40 hex chars | `0xBeeD38951e4Bb9205b461560a6479763157c606e` |
-| `poly_api_key` | UUID | `da85d242-0a7d-6a65-bb82-fb7d9a1c7c14` |
-| `poly_passphrase` | 64 hex chars | `184fbb107bc28939589d7432df646bf2e5ed942c91a0b0b1be785380c90cd6cc` |
-| `poly_signature` | Base64 | `_wQeobJEHYuu6GwMKVLPUN3l1OsdvyR5BPiXtxr4psc=` |
-| `poly_timestamp` | Unix seconds | `1767658169` |
+| Header            | Format            | Example                                                            |
+| ----------------- | ----------------- | ------------------------------------------------------------------ |
+| `poly_address`    | 0x + 40 hex chars | `0xBeeD38951e4Bb9205b461560a6479763157c606e`                       |
+| `poly_api_key`    | UUID              | `da85d242-0a7d-6a65-bb82-fb7d9a1c7c14`                             |
+| `poly_passphrase` | 64 hex chars      | `184fbb107bc28939589d7432df646bf2e5ed942c91a0b0b1be785380c90cd6cc` |
+| `poly_signature`  | Base64            | `_wQeobJEHYuu6GwMKVLPUN3l1OsdvyR5BPiXtxr4psc=`                     |
+| `poly_timestamp`  | Unix seconds      | `1767658169`                                                       |
 
 ### Signature Generation
 
@@ -209,6 +229,7 @@ fn generate_signature(
 ### POST /order
 
 **Request Body:**
+
 ```json
 {
   "deferExec": false,
@@ -234,21 +255,21 @@ fn generate_signature(
 
 ### Order Fields Explained
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `salt` | u64 | Random nonce for uniqueness |
-| `maker` | Address | Proxy wallet (trading address) |
-| `signer` | Address | EOA signer (API key address) |
-| `taker` | Address | `0x0...0` for any taker |
-| `tokenId` | String | Asset ID (256-bit integer) |
-| `makerAmount` | String | USDC amount (6 decimals) |
-| `takerAmount` | String | Token amount (6 decimals) |
-| `side` | String | `"BUY"` or `"SELL"` |
-| `expiration` | String | Unix timestamp or `"0"` |
-| `nonce` | String | Order nonce (usually `"0"`) |
-| `feeRateBps` | String | Fee in basis points |
-| `signatureType` | u8 | `1` = EOA, `2` = Gnosis Safe |
-| `signature` | String | EIP-712 signature (132 chars) |
+| Field           | Type    | Description                    |
+| --------------- | ------- | ------------------------------ |
+| `salt`          | u64     | Random nonce for uniqueness    |
+| `maker`         | Address | Proxy wallet (trading address) |
+| `signer`        | Address | EOA signer (API key address)   |
+| `taker`         | Address | `0x0...0` for any taker        |
+| `tokenId`       | String  | Asset ID (256-bit integer)     |
+| `makerAmount`   | String  | USDC amount (6 decimals)       |
+| `takerAmount`   | String  | Token amount (6 decimals)      |
+| `side`          | String  | `"BUY"` or `"SELL"`            |
+| `expiration`    | String  | Unix timestamp or `"0"`        |
+| `nonce`         | String  | Order nonce (usually `"0"`)    |
+| `feeRateBps`    | String  | Fee in basis points            |
+| `signatureType` | u8      | `1` = EOA, `2` = Gnosis Safe   |
+| `signature`     | String  | EIP-712 signature (132 chars)  |
 
 ### Amount Calculations
 
@@ -266,11 +287,11 @@ Example: Buy at $0.31
 
 ### Order Types
 
-| Type | Description |
-|------|-------------|
+| Type  | Description                                          |
+| ----- | ---------------------------------------------------- |
 | `FAK` | Fill And Kill - execute immediately, cancel unfilled |
-| `GTC` | Good Till Cancel - remain on book until filled |
-| `FOK` | Fill Or Kill - execute entire order or cancel |
+| `GTC` | Good Till Cancel - remain on book until filled       |
+| `FOK` | Fill Or Kill - execute entire order or cancel        |
 
 ### Response
 
@@ -294,26 +315,27 @@ Example: Buy at $0.31
 
 ### Base URL: `https://gamma-api.polymarket.com`
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/markets` | Market metadata with categories |
-| GET | `/events` | Event information with filtering |
-| GET | `/tags` | List all available tags/categories |
-| GET | `/sports` | Automated sports league markets |
+| Method | Endpoint   | Description                        |
+| ------ | ---------- | ---------------------------------- |
+| GET    | `/markets` | Market metadata with categories    |
+| GET    | `/events`  | Event information with filtering   |
+| GET    | `/tags`    | List all available tags/categories |
+| GET    | `/sports`  | Automated sports league markets    |
 
 ### Market Filtering Parameters
 
 The `/events` endpoint supports filtering by:
 
-| Parameter | Description | Example |
-|-----------|-------------|---------|
-| `tag_id` | Filter by category (crypto, sports, etc.) | `tag_id=<crypto_tag_id>` |
-| `active` | Only active/tradeable markets | `active=true` |
-| `closed` | Filter by closed status | `closed=false` |
-| `series_id` | Filter by sports league | `series_id=<league_id>` |
-| `order` | Sort results | `order=startTime` |
+| Parameter   | Description                               | Example                  |
+| ----------- | ----------------------------------------- | ------------------------ |
+| `tag_id`    | Filter by category (crypto, sports, etc.) | `tag_id=<crypto_tag_id>` |
+| `active`    | Only active/tradeable markets             | `active=true`            |
+| `closed`    | Filter by closed status                   | `closed=false`           |
+| `series_id` | Filter by sports league                   | `series_id=<league_id>`  |
+| `order`     | Sort results                              | `order=startTime`        |
 
 **Example: Get active crypto markets:**
+
 ```bash
 # Step 1: Get crypto tag ID
 curl "https://gamma-api.polymarket.com/tags"
@@ -333,11 +355,13 @@ curl "https://gamma-api.polymarket.com/events?tag_id=<crypto_tag_id>&active=true
 Identifies market type by fee structure. **Critical for finding 15-min crypto markets.**
 
 **Request:**
+
 ```
 GET https://clob.polymarket.com/fee-rate?token_id={token_id}
 ```
 
 **Response:**
+
 ```json
 {
   "fee_rate_bps": 1000
@@ -358,11 +382,11 @@ GET https://clob.polymarket.com/fee-rate?token_id={token_id}
 
 ### Current Fee Structure
 
-| Market Type | Maker Fee | Taker Fee | Notes |
-|-------------|-----------|-----------|-------|
-| **Standard Markets** | 0 bps | 0 bps | Most prediction markets |
-| **15-Min Crypto Markets** | 0 bps (+ rebates) | Up to ~300 bps (~3%) | Fee varies by odds - highest at 50/50, drops near 0%/100% |
-| **Polymarket U.S. Exchange** | 0 bps (+ rewards) | 1 bps (0.01%) | Flat fee structure |
+| Market Type                  | Maker Fee         | Taker Fee            | Notes                                                     |
+| ---------------------------- | ----------------- | -------------------- | --------------------------------------------------------- |
+| **Standard Markets**         | 0 bps             | 0 bps                | Most prediction markets                                   |
+| **15-Min Crypto Markets**    | 0 bps (+ rebates) | Up to ~300 bps (~3%) | Fee varies by odds - highest at 50/50, drops near 0%/100% |
+| **Polymarket U.S. Exchange** | 0 bps (+ rewards) | 1 bps (0.01%)        | Flat fee structure                                        |
 
 ### Key Points
 
@@ -382,15 +406,16 @@ GET https://clob.polymarket.com/fee-rate?token_id={token_id}
 
 ### Observed Depth by Market Type
 
-| Market Type | Example | Bid Levels | Ask Levels | Notes |
-|-------------|---------|------------|------------|-------|
-| **Political (Long-term)** | Venezuela invasion | 47 | 147 | Deep books, good liquidity |
-| **Monetary Policy** | Fed rate decision | 5 | 76 | Concentrated at extremes (0.5% Yes) |
-| **15-Min Crypto** | Bitcoin Up/Down | Variable | Variable | High velocity, ~10 updates/sec |
+| Market Type               | Example            | Bid Levels | Ask Levels | Notes                               |
+| ------------------------- | ------------------ | ---------- | ---------- | ----------------------------------- |
+| **Political (Long-term)** | Venezuela invasion | 47         | 147        | Deep books, good liquidity          |
+| **Monetary Policy**       | Fed rate decision  | 5          | 76         | Concentrated at extremes (0.5% Yes) |
+| **15-Min Crypto**         | Bitcoin Up/Down    | Variable   | Variable   | High velocity, ~10 updates/sec      |
 
 ### 15-Min Crypto Market Characteristics
 
 Live capture analysis (30 seconds, 397 trades):
+
 - **Both sides have liquidity** - trades on both UP and DOWN tokens
 - UP token: 223 BUY trades, 36 SELL trades (prices 0.82-0.96)
 - DOWN token: 94 BUY trades, 44 SELL trades (prices 0.05-0.18)
@@ -402,6 +427,7 @@ Live capture analysis (30 seconds, 397 trades):
 ### Order Book Structure
 
 **Standard Markets (Political/General):**
+
 ```
 Bids: [0.055, 0.053, 0.052, ...] - Multiple levels with depth
 Asks: [0.056, 0.061, 0.062, ...] - Multiple levels with depth
@@ -409,6 +435,7 @@ Spread: 1 cent typical
 ```
 
 **15-Min Crypto Markets:**
+
 ```
 High velocity - book changes rapidly
 Both YES and NO tokens have active buyers and sellers
@@ -456,18 +483,19 @@ pub type Amount = String; // "1000000" = 1 USDC
 
 ### Message Types
 
-| event_type | Description |
-|------------|-------------|
-| `book` | Full order book snapshot |
-| `price_change` | Price update (includes best_bid/best_ask) |
-| `last_trade_price` | Trade executed with transaction hash |
-| `trade` | Trade executed (User WebSocket) |
+| event_type         | Description                               |
+| ------------------ | ----------------------------------------- |
+| `book`             | Full order book snapshot                  |
+| `price_change`     | Price update (includes best_bid/best_ask) |
+| `last_trade_price` | Trade executed with transaction hash      |
+| `trade`            | Trade executed (User WebSocket)           |
 
 ### price_change Event Format (MARKET WebSocket)
 
 **VALIDATED FROM LIVE DATA (Research-1, Jan 2026)**
 
 Received on order book changes. Includes both sides of the market in a single message:
+
 ```json
 {
   "market": "0x7f3c6b9029a1a4a932509c147a2cc0762e1116b7a4568cde472908b29dd4889d",
@@ -503,6 +531,7 @@ Received on order book changes. Includes both sides of the market in a single me
 **VALIDATED FROM LIVE DATA (Research-1, Jan 2026)**
 
 Received when a trade executes:
+
 ```json
 {
   "market": "0x17815081230e3b9c78b098162c33b1ffa68c4ec29c123d3d14989599e0c2e113",
@@ -523,54 +552,58 @@ Received when a trade executes:
 
 ### HTTP Status Codes
 
-| Code | Meaning |
-|------|---------|
-| 200 | Success |
-| 400 | Bad request (invalid order) |
-| 401 | Unauthorized (bad signature) |
-| 429 | Rate limited |
-| 500 | Server error |
+| Code | Meaning                      |
+| ---- | ---------------------------- |
+| 200  | Success                      |
+| 400  | Bad request (invalid order)  |
+| 401  | Unauthorized (bad signature) |
+| 429  | Rate limited                 |
+| 500  | Server error                 |
 
 ### Complete Error Code Catalog
 
 #### Order Placement Errors (Insert Error Messages)
 
-| Error Code | Description | Retryable? |
-|------------|-------------|------------|
-| `INVALID_ORDER_MIN_TICK_SIZE` | Price breaks minimum tick size rules | No (Fatal) |
-| `INVALID_ORDER_MIN_SIZE` | Size lower than minimum | No (Fatal) |
-| `INVALID_ORDER_DUPLICATED` | Same order already placed | No (Fatal) |
-| `INVALID_ORDER_NOT_ENOUGH_BALANCE` | Insufficient balance/allowance | No (Fatal) |
-| `INVALID_ORDER_EXPIRATION` | Expiration time is in the past | No (Fatal) |
-| `INVALID_ORDER_ERROR` | System error inserting order | No (Fatal) |
-| `EXECUTION_ERROR` | System error executing trade | No (Fatal) |
-| `ORDER_DELAYED` | Order match delayed | **Yes (Retryable)** |
-| `FOK_ORDER_NOT_FILLED_ERROR` | FOK order couldn't be fully filled | No (Expected) |
-| `MARKET_NOT_READY` | Market not accepting orders yet | **Yes (Retryable)** |
+| Error Code                         | Description                          | Retryable?          |
+| ---------------------------------- | ------------------------------------ | ------------------- |
+| `INVALID_ORDER_MIN_TICK_SIZE`      | Price breaks minimum tick size rules | No (Fatal)          |
+| `INVALID_ORDER_MIN_SIZE`           | Size lower than minimum              | No (Fatal)          |
+| `INVALID_ORDER_DUPLICATED`         | Same order already placed            | No (Fatal)          |
+| `INVALID_ORDER_NOT_ENOUGH_BALANCE` | Insufficient balance/allowance       | No (Fatal)          |
+| `INVALID_ORDER_EXPIRATION`         | Expiration time is in the past       | No (Fatal)          |
+| `INVALID_ORDER_ERROR`              | System error inserting order         | No (Fatal)          |
+| `EXECUTION_ERROR`                  | System error executing trade         | No (Fatal)          |
+| `ORDER_DELAYED`                    | Order match delayed                  | **Yes (Retryable)** |
+| `FOK_ORDER_NOT_FILLED_ERROR`       | FOK order couldn't be fully filled   | No (Expected)       |
+| `MARKET_NOT_READY`                 | Market not accepting orders yet      | **Yes (Retryable)** |
 
 #### Authentication Errors
 
-| Error Code | Description | Retryable? |
-|------------|-------------|------------|
-| `INVALID_SIGNATURE` | Bad EIP-712 signature | No (Fatal) |
-| `NONCE_ALREADY_USED` | Nonce was already used | No (Fatal) |
+| Error Code               | Description            | Retryable? |
+| ------------------------ | ---------------------- | ---------- |
+| `INVALID_SIGNATURE`      | Bad EIP-712 signature  | No (Fatal) |
+| `NONCE_ALREADY_USED`     | Nonce was already used | No (Fatal) |
 | `Invalid Funder Address` | Invalid funder address | No (Fatal) |
 
 ### Retryable vs Fatal Error Classification
 
 **Retryable Errors (Temporary - can retry after delay):**
+
 - `ORDER_DELAYED` - Order matching was delayed, retry after short backoff
 - `MARKET_NOT_READY` - Market not accepting orders yet, check `accepting_orders` field before retry
 
 **Fatal Errors (Permanent - do not retry same request):**
+
 - All `INVALID_ORDER_*` errors - Fix the order parameters before retrying
 - Authentication errors - Fix credentials/signature logic
 - `EXECUTION_ERROR` - System error, log and investigate
 
 **Expected Errors (Not failures, just unsuccessful):**
+
 - `FOK_ORDER_NOT_FILLED_ERROR` - Expected for FOK orders when liquidity insufficient; do not count toward circuit breaker
 
 **Error Response Format:**
+
 ```json
 {
   "success": false,
@@ -588,6 +621,7 @@ Note: `success=true` with non-empty `errorMsg` indicates the order was processed
 ### Rate Limiting
 
 Rate limits use **Cloudflare throttling** - requests are delayed/queued rather than immediately rejected with HTTP 429. This means:
+
 - You may experience increased latency under high request rates
 - The API does not return an explicit rate limit error response format
 - Practical limits: ~100 requests/minute for REST API, ~10 orders/second
@@ -595,6 +629,7 @@ Rate limits use **Cloudflare throttling** - requests are delayed/queued rather t
 ### Closed Market Handling
 
 Before placing orders, check the market's `accepting_orders: boolean` field:
+
 - `accepting_orders: true` - Market is open for trading
 - `accepting_orders: false` - Market is closed, orders will fail with `MARKET_NOT_READY`
 
@@ -613,6 +648,7 @@ Markets close before resolution. Always verify market status before order submis
 ## 10. Quick Reference
 
 ### URLs
+
 ```
 REST:       https://clob.polymarket.com
 Gamma:      https://gamma-api.polymarket.com
@@ -622,12 +658,14 @@ WS Live:    wss://ws-live-data.polymarket.com/
 ```
 
 ### Chain Info
+
 ```
 Chain ID:   137 (Polygon)
 USDC:       6 decimals
 ```
 
 ### Official Resources
+
 ```
 Docs:       https://docs.polymarket.com/
 Rust SDK:   https://github.com/Polymarket/rs-clob-client

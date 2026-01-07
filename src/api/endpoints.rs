@@ -102,9 +102,18 @@ pub struct TimeResponse {
 }
 
 /// Fee rate from /fee-rate endpoint
+/// Note: API returns "base_fee" but we alias it for compatibility
 #[derive(Debug, Clone, Deserialize)]
 pub struct FeeRateResponse {
-    pub fee_rate_bps: u32,
+    #[serde(alias = "fee_rate_bps")]
+    pub base_fee: u32,
+}
+
+/// Wrapper for paginated /markets endpoint response
+#[derive(Debug, Clone, Deserialize)]
+pub struct MarketsResponse {
+    pub data: Vec<MarketInfo>,
+    pub next_cursor: Option<String>,
 }
 
 // ============================================================================
@@ -176,11 +185,49 @@ impl ApiClient {
         serde_json::from_str(&body).map_err(|e| BotError::Json(e.to_string()))
     }
 
-    /// Get all markets
+    /// Get all markets (paginated - returns first page with up to 1000 markets)
+    /// 
+    /// Note: API returns wrapped response `{"data": [...], "next_cursor": "..."}`
+    /// For full pagination, use `get_markets_page` with cursor
     pub async fn get_markets(&self) -> Result<Vec<MarketInfo>> {
         let response = self.get("/markets").await?;
         let body = response.text().await.map_err(|e| BotError::Http(e))?;
-        serde_json::from_str(&body).map_err(|e| BotError::Json(e.to_string()))
+        let markets_response: MarketsResponse = 
+            serde_json::from_str(&body).map_err(|e| BotError::Json(e.to_string()))?;
+        Ok(markets_response.data)
+    }
+    
+    /// Get markets with pagination cursor
+    /// 
+    /// Returns (markets, next_cursor) - use next_cursor for subsequent calls
+    pub async fn get_markets_page(&self, cursor: Option<&str>) -> Result<(Vec<MarketInfo>, Option<String>)> {
+        let path = match cursor {
+            Some(c) => format!("/markets?next_cursor={}", c),
+            None => "/markets".to_string(),
+        };
+        let response = self.get(&path).await?;
+        let body = response.text().await.map_err(|e| BotError::Http(e))?;
+        let markets_response: MarketsResponse = 
+            serde_json::from_str(&body).map_err(|e| BotError::Json(e.to_string()))?;
+        Ok((markets_response.data, markets_response.next_cursor))
+    }
+    
+    /// Get all markets with full pagination (iterates through all pages)
+    pub async fn get_all_markets(&self) -> Result<Vec<MarketInfo>> {
+        let mut all_markets = Vec::new();
+        let mut cursor: Option<String> = None;
+        
+        loop {
+            let (markets, next_cursor) = self.get_markets_page(cursor.as_deref()).await?;
+            all_markets.extend(markets);
+            
+            match next_cursor {
+                Some(c) if !c.is_empty() => cursor = Some(c),
+                _ => break,
+            }
+        }
+        
+        Ok(all_markets)
     }
 
     /// Get a specific market by condition ID
@@ -220,8 +267,10 @@ impl ApiClient {
     }
 
     /// Get fee rate for a token (identifies market type)
-    /// - fee_rate_bps: 1000 = 15-min crypto market
-    /// - fee_rate_bps: 0 = standard market
+    /// 
+    /// Returns `FeeRateResponse` with `base_fee` field in basis points:
+    /// - base_fee: 1000 (10%) = 15-min crypto market
+    /// - base_fee: 0 = standard market
     pub async fn get_fee_rate(&self, token_id: &str) -> Result<FeeRateResponse> {
         let path = format!("/fee-rate?token_id={}", token_id);
         let response = self.get(&path).await?;
@@ -385,8 +434,45 @@ mod tests {
 
     #[test]
     fn test_fee_rate_deserialize() {
-        let json = r#"{"fee_rate_bps": 1000}"#;
+        // API returns "base_fee"
+        let json = r#"{"base_fee": 1000}"#;
         let response: FeeRateResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(response.fee_rate_bps, 1000);
+        assert_eq!(response.base_fee, 1000);
+    }
+
+    #[test]
+    fn test_fee_rate_alias_deserialize() {
+        // Also support legacy "fee_rate_bps" for compatibility
+        let json = r#"{"fee_rate_bps": 500}"#;
+        let response: FeeRateResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.base_fee, 500);
+    }
+
+    #[test]
+    fn test_markets_response_deserialize() {
+        let json = r#"{
+            "data": [
+                {
+                    "conditionId": "0x1234",
+                    "question": "Test?",
+                    "active": true,
+                    "tokens": []
+                }
+            ],
+            "next_cursor": "abc123"
+        }"#;
+        
+        let response: MarketsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.data.len(), 1);
+        assert_eq!(response.data[0].condition_id, "0x1234");
+        assert_eq!(response.next_cursor, Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn test_markets_response_no_cursor() {
+        let json = r#"{"data": [], "next_cursor": null}"#;
+        let response: MarketsResponse = serde_json::from_str(json).unwrap();
+        assert!(response.data.is_empty());
+        assert_eq!(response.next_cursor, None);
     }
 }
