@@ -2,6 +2,7 @@
 //!
 //! High-frequency trading bot for Polymarket prediction markets.
 
+use polymarket_bot::api::MarketDiscovery;
 use polymarket_bot::strategy::MarketPair;
 use polymarket_bot::{Bot, Config, KillSwitch};
 use std::sync::Arc;
@@ -70,48 +71,72 @@ async fn main() -> anyhow::Result<()> {
     // ===========================================================================
     // MARKET DISCOVERY
     // ===========================================================================
-    // In production, markets are discovered via REST API:
-    //
-    //   let client = ApiClient::new(&config)?;
-    //   let markets = client.get_markets().await?;
-    //   for market in markets {
-    //       if market.active && !market.closed && market.tokens.len() == 2 {
-    //           let yes_token = market.tokens.iter().find(|t| t.outcome == "Yes");
-    //           let no_token = market.tokens.iter().find(|t| t.outcome == "No");
-    //           if let (Some(yes), Some(no)) = (yes_token, no_token) {
-    //               let pair = MarketPair::new(
-    //                   market.condition_id,
-    //                   yes.token_id.clone(),
-    //                   no.token_id.clone(),
-    //               );
-    //               registry.register(pair);
-    //           }
-    //       }
-    //   }
-    //
-    // For Phase 7 MVP, we use hardcoded test tokens.
-    // TODO: Replace with API discovery in Phase 8+
+    // Discover 15-minute crypto markets from Gamma API
+    // Uses slug-based discovery: btc-updown-15m-{timestamp}, etc.
     // ===========================================================================
 
-    // HARDCODED TEST MARKET - Replace with API discovery!
-    // These are example token IDs from a BTC 15-minute market
-    let yes_token = "91146426612524606788185897426983484145854573836093539884347307480474597236733".to_string();
-    let no_token = "42146376778762047477642266233020835044794863565048464944940190870964136665187".to_string();
-    let market_id = "91146426612524606788185897426983484145854573836093539884347307480474597236733".to_string();
+    info!("Discovering 15-min crypto markets from Gamma API...");
+    
+    let discovery = MarketDiscovery::new();
+    
+    // Discover 15-min crypto markets (Up/Down) using slug pattern discovery
+    let discovered = match discovery.discover_crypto_15min().await {
+        Ok(markets) => {
+            // Limit to first 5 markets
+            markets.into_iter().take(5).collect::<Vec<_>>()
+        }
+        Err(e) => {
+            warn!("Failed to discover markets from API: {}", e);
+            warn!("Falling back to hardcoded test market...");
+            vec![]
+        }
+    };
+    
+    let (market_pairs, token_ids): (Vec<MarketPair>, Vec<String>) = if !discovered.is_empty() {
+        info!("Discovered {} tradeable 15-min crypto markets", discovered.len());
+        
+        let mut pairs = Vec::new();
+        let mut tokens = Vec::new();
+        
+        for dm in &discovered {
+            info!(
+                "  Market: {} ({}/{})",
+                dm.condition_id, dm.first_outcome, dm.second_outcome
+            );
+            info!("    Question: {}", dm.question);
+            info!("    First token: {}", dm.first_token_id);
+            info!("    Second token: {}", dm.second_token_id);
+            info!("    Fee rate: {} bps", dm.fee_rate_bps);
+            
+            pairs.push(dm.to_market_pair());
+            tokens.push(dm.first_token_id.clone());
+            tokens.push(dm.second_token_id.clone());
+        }
+        
+        (pairs, tokens)
+    } else {
+        // Fallback to hardcoded market for testing when API fails
+        warn!("No markets discovered - using hardcoded fallback");
+        
+        let yes_token = "91146426612524606788185897426983484145854573836093539884347307480474597236733".to_string();
+        let no_token = "42146376778762047477642266233020835044794863565048464944940190870964136665187".to_string();
+        let market_id = "0x_fallback_test".to_string();
+        
+        let pairs = vec![
+            MarketPair::new_up_down(
+                market_id,
+                yes_token.clone(),
+                no_token.clone(),
+            )
+            .with_description("FALLBACK TEST MARKET"),
+        ];
+        
+        let tokens = vec![yes_token, no_token];
+        
+        (pairs, tokens)
+    };
 
-    let market_pairs = vec![
-        MarketPair::new(
-            market_id.clone(),
-            yes_token.clone(),
-            no_token.clone(),
-        )
-        .with_fee_rate(1000) // 15-min crypto has 10% max fee
-        .with_description("BTC 15-minute Up/Down [TEST]"),
-    ];
-
-    let token_ids = vec![yes_token, no_token];
-
-    warn!("Using {} HARDCODED test market pair(s) - implement API discovery for production!", market_pairs.len());
+    info!("Registered {} market pair(s) with {} token(s)", market_pairs.len(), token_ids.len());
 
     // Create and run the bot
     let mut bot = Bot::new(config, kill_switch.clone(), token_ids, market_pairs).await;

@@ -1,13 +1,22 @@
-//! Market pair registry - tracks YES/NO token pairs for binary markets
+//! Market pair registry - tracks binary market token pairs
 //!
-//! Binary markets on Polymarket have two outcome tokens (YES and NO).
-//! For arbitrage detection, we need to know which tokens are complements.
+//! Binary markets on Polymarket have two outcome tokens. For arbitrage detection,
+//! we need to know which tokens are complements.
+//!
+//! ## Supported Market Types
+//!
+//! - **Yes/No markets**: Standard binary markets with "Yes"/"No" outcomes
+//! - **Up/Down markets**: 15-minute crypto markets with "Up"/"Down" outcomes
+//!
+//! Both are functionally equivalent for arbitrage:
+//! - First token (Yes/Up) = positive outcome
+//! - Second token (No/Down) = negative outcome
 //!
 //! ## Key Insight
 //!
 //! The WebSocket sends updates per token_id, not per market. We need to:
 //! 1. Discover which tokens belong to the same market
-//! 2. Know which is YES and which is NO
+//! 2. Know which is the first and second outcome
 //! 3. Look up the complement when one side updates
 
 use crate::api::types::{ConditionId, TokenId};
@@ -15,16 +24,33 @@ use dashmap::DashMap;
 use rust_decimal::Decimal;
 use std::sync::Arc;
 
-/// A binary market pair (YES and NO tokens)
+/// Type of binary market outcomes
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BinaryOutcomeType {
+    /// Standard binary (Yes/No)
+    #[default]
+    YesNo,
+    /// Crypto 15-min (Up/Down)
+    UpDown,
+    /// Unknown binary (2 outcomes but not Yes/No or Up/Down)
+    Other,
+}
+
+/// A binary market pair (two complement tokens)
+///
+/// For historical reasons, fields are named `yes_token_id` and `no_token_id`,
+/// but they work for any binary market:
+/// - `yes_token_id` = first outcome (Yes, Up, etc.)
+/// - `no_token_id` = second outcome (No, Down, etc.)
 #[derive(Debug, Clone)]
 pub struct MarketPair {
     /// Market/condition ID (0x-prefixed hash)
     pub condition_id: ConditionId,
 
-    /// YES outcome token ID (256-bit integer as string)
+    /// First outcome token ID (Yes/Up - 256-bit integer as string)
     pub yes_token_id: TokenId,
 
-    /// NO outcome token ID (256-bit integer as string)
+    /// Second outcome token ID (No/Down - 256-bit integer as string)
     pub no_token_id: TokenId,
 
     /// Fee rate in basis points (1000 = 10% for 15-min crypto)
@@ -41,10 +67,19 @@ pub struct MarketPair {
 
     /// Tick size for prices
     pub tick_size: Decimal,
+    
+    /// Type of binary outcomes
+    pub outcome_type: BinaryOutcomeType,
+    
+    /// First outcome label (Yes, Up, etc.)
+    pub first_outcome_label: String,
+    
+    /// Second outcome label (No, Down, etc.)  
+    pub second_outcome_label: String,
 }
 
 impl MarketPair {
-    /// Create a new market pair
+    /// Create a new market pair (defaults to Yes/No type)
     pub fn new(
         condition_id: ConditionId,
         yes_token_id: TokenId,
@@ -59,6 +94,76 @@ impl MarketPair {
             description: String::new(),
             min_order_size: Decimal::ONE,
             tick_size: Decimal::new(1, 2), // 0.01 default
+            outcome_type: BinaryOutcomeType::YesNo,
+            first_outcome_label: "Yes".to_string(),
+            second_outcome_label: "No".to_string(),
+        }
+    }
+    
+    /// Create a new Up/Down market pair (for 15-min crypto)
+    pub fn new_up_down(
+        condition_id: ConditionId,
+        up_token_id: TokenId,
+        down_token_id: TokenId,
+    ) -> Self {
+        Self {
+            condition_id,
+            yes_token_id: up_token_id,
+            no_token_id: down_token_id,
+            fee_rate_bps: 1000, // 15-min crypto default
+            is_neg_risk: false,
+            description: String::new(),
+            min_order_size: Decimal::ONE,
+            tick_size: Decimal::new(1, 2),
+            outcome_type: BinaryOutcomeType::UpDown,
+            first_outcome_label: "Up".to_string(),
+            second_outcome_label: "Down".to_string(),
+        }
+    }
+    
+    /// Create with custom outcome labels
+    pub fn with_outcomes(
+        condition_id: ConditionId,
+        first_token_id: TokenId,
+        second_token_id: TokenId,
+        first_label: impl Into<String>,
+        second_label: impl Into<String>,
+    ) -> Self {
+        let first = first_label.into();
+        let second = second_label.into();
+        
+        // Determine outcome type from labels
+        let outcome_type = Self::classify_outcome_type(&first, &second);
+        let fee_rate_bps = if outcome_type == BinaryOutcomeType::UpDown { 1000 } else { 0 };
+        
+        Self {
+            condition_id,
+            yes_token_id: first_token_id,
+            no_token_id: second_token_id,
+            fee_rate_bps,
+            is_neg_risk: false,
+            description: String::new(),
+            min_order_size: Decimal::ONE,
+            tick_size: Decimal::new(1, 2),
+            outcome_type,
+            first_outcome_label: first,
+            second_outcome_label: second,
+        }
+    }
+    
+    /// Classify outcome type from labels
+    fn classify_outcome_type(first: &str, second: &str) -> BinaryOutcomeType {
+        let first_lower = first.to_lowercase();
+        let second_lower = second.to_lowercase();
+        
+        if (first_lower == "yes" && second_lower == "no") ||
+           (first_lower == "no" && second_lower == "yes") {
+            BinaryOutcomeType::YesNo
+        } else if (first_lower == "up" && second_lower == "down") ||
+                  (first_lower == "down" && second_lower == "up") {
+            BinaryOutcomeType::UpDown
+        } else {
+            BinaryOutcomeType::Other
         }
     }
 
@@ -90,6 +195,40 @@ impl MarketPair {
     pub fn is_crypto_15min(&self) -> bool {
         // 15-min crypto markets have fee_rate_bps = 1000 (10%)
         self.fee_rate_bps >= 100
+    }
+    
+    /// Is this an Up/Down market?
+    pub fn is_up_down(&self) -> bool {
+        self.outcome_type == BinaryOutcomeType::UpDown
+    }
+    
+    /// Is this a Yes/No market?
+    pub fn is_yes_no(&self) -> bool {
+        self.outcome_type == BinaryOutcomeType::YesNo
+    }
+    
+    // ========================================================================
+    // Token accessors with semantic names
+    // ========================================================================
+    
+    /// Get first outcome token ID (Yes/Up)
+    pub fn first_token_id(&self) -> &TokenId {
+        &self.yes_token_id
+    }
+    
+    /// Get second outcome token ID (No/Down)
+    pub fn second_token_id(&self) -> &TokenId {
+        &self.no_token_id
+    }
+    
+    /// Get Up token ID (alias for first_token_id on Up/Down markets)
+    pub fn up_token_id(&self) -> &TokenId {
+        &self.yes_token_id
+    }
+    
+    /// Get Down token ID (alias for second_token_id on Up/Down markets)
+    pub fn down_token_id(&self) -> &TokenId {
+        &self.no_token_id
     }
 
     /// Get the complement token ID
@@ -345,5 +484,62 @@ mod tests {
         let crypto = registry.crypto_15min_markets();
         assert_eq!(crypto.len(), 1);
         assert_eq!(crypto[0].condition_id, "0xabc123");
+    }
+    
+    #[test]
+    fn test_up_down_market() {
+        let pair = MarketPair::new_up_down(
+            "0xbtc15m".to_string(),
+            "up_token".to_string(),
+            "down_token".to_string(),
+        );
+        
+        assert!(pair.is_up_down());
+        assert!(!pair.is_yes_no());
+        assert_eq!(pair.outcome_type, BinaryOutcomeType::UpDown);
+        assert_eq!(pair.first_outcome_label, "Up");
+        assert_eq!(pair.second_outcome_label, "Down");
+        assert_eq!(pair.up_token_id(), "up_token");
+        assert_eq!(pair.down_token_id(), "down_token");
+        assert_eq!(pair.fee_rate_bps, 1000); // Default for crypto
+    }
+    
+    #[test]
+    fn test_with_outcomes() {
+        let pair = MarketPair::with_outcomes(
+            "0x123".to_string(),
+            "token1".to_string(),
+            "token2".to_string(),
+            "Up",
+            "Down",
+        );
+        
+        assert!(pair.is_up_down());
+        assert_eq!(pair.first_outcome_label, "Up");
+        assert_eq!(pair.second_outcome_label, "Down");
+        
+        let pair2 = MarketPair::with_outcomes(
+            "0x456".to_string(),
+            "tokenA".to_string(),
+            "tokenB".to_string(),
+            "Yes",
+            "No",
+        );
+        
+        assert!(pair2.is_yes_no());
+        assert_eq!(pair2.first_outcome_label, "Yes");
+    }
+    
+    #[test]
+    fn test_token_accessors() {
+        let pair = sample_pair();
+        
+        // Generic accessors
+        assert_eq!(pair.first_token_id(), "123456789");
+        assert_eq!(pair.second_token_id(), "987654321");
+        
+        // Yes/No accessors (backward compatible)
+        assert_eq!(&pair.yes_token_id, "123456789");
+        assert_eq!(&pair.no_token_id, "987654321");
     }
 }

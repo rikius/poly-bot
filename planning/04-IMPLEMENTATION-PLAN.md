@@ -4,7 +4,7 @@
 
 ---
 
-## 🚀 Current Status: Phase 6 Complete + Event-Driven Refactor (Updated: 2026-01-06)
+## 🚀 Current Status: Phase 7.5 Complete (Updated: 2026-01-07)
 
 ### ✅ Completed Phases
 
@@ -16,20 +16,23 @@
 - **Phase 5:** Risk & Circuit Breaker - Safety systems complete (75 tests ✅)
 - **Phase 6:** Strategy Framework - Traits, router, executor, policies (94 tests ✅)
 - **Event-Driven Refactor:** tokio::select! architecture, <1ms latency
+- **Phase 7:** Math Arb Strategy (MVP) - Market pairs, edge calculator, MathArbStrategy (115 tests ✅)
+- **Phase 7.5:** API Fix & Market Discovery - Gamma API, slug-based discovery (136 tests ✅)
 
 ### 🚧 In Progress
 
-- **Phase 7:** Math Arb Strategy (MVP) - NEXT
+- **Phase 8:** Wire Execution Policies - Connect taker/maker to actual order submission
 
 ### 📊 Metrics
 
-- **Tests Passing:** 94/94 unit tests
+- **Tests Passing:** 136/136 unit tests
 - **Build Time:** ~2s
 - **WebSocket:** Market data + User fills streaming
 - **Order Book:** Tracking markets with lock-free DashMap
 - **Ledger:** Orders, Positions, Cash tracking with DashMap
 - **Risk:** Circuit breaker, limits, reconciliation
-- **Strategy:** Trait system, router, executor with policies
+- **Strategy:** MathArbStrategy with dynamic edge detection
+- **Discovery:** Auto-discovers 15-min crypto markets (BTC, ETH, SOL)
 - **Architecture:** Event-driven with tokio::select!, <1ms latency
 - **Code Quality:** Clean module separation
 
@@ -276,35 +279,35 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 
 ---
 
-## Phase 7: Strategy MVP (Math Arb Implements Strategy Trait)
+## Phase 7: Strategy MVP (Math Arb Implements Strategy Trait) ✅ COMPLETED
 
-### 7.1 Dynamic Edge Calculator
+### 7.1 Dynamic Edge Calculator ✅
 
-- [ ] Implement `EdgeCalculator` in `src/strategy/edge_calculator.rs`
-- [ ] Replace static ARB_THRESHOLD = 0.97 with dynamic calculation
-- [ ] `required_edge = fees + slippage + partial_fill_risk + spread_penalty`
-- [ ] Estimate slippage from book depth using `OrderBookState::depth()`
-- [ ] Increase margin for thin books
+- [x] Implement `EdgeCalculator` in `src/strategy/edge_calculator.rs`
+- [x] Replace static ARB_THRESHOLD = 0.97 with dynamic calculation
+- [x] `required_edge = fees + slippage + partial_fill_risk + spread_penalty`
+- [x] Estimate slippage from book depth using `OrderBookState::depth()`
+- [x] Increase margin for thin books
 
-### 7.2 MathArbStrategy (Implements Strategy Trait)
+### 7.2 MathArbStrategy (Implements Strategy Trait) ✅
 
-- [ ] Implement `Strategy` trait for `MathArbStrategy`:
+- [x] Implement `Strategy` trait for `MathArbStrategy`:
   - `on_book_update()` → check for arb opportunity, return `Vec<OrderIntent>`
   - Uses `ctx.books.best_ask()` primitives (NOT check_arbitrage)
   - Uses `ctx.registry.filter()` for market selection
-- [ ] Subscribe to 15-min binary crypto markets via `MarketFilter`
-- [ ] Return TWO `OrderIntent`s for both arb legs (YES + NO)
-- [ ] Set `urgency: Urgency::Immediate` for taker execution
+- [x] Subscribe to 15-min binary crypto markets via `MarketFilter`
+- [x] Return TWO `OrderIntent`s for both arb legs (YES + NO)
+- [x] Set `urgency: Urgency::Immediate` for taker execution
 
-### 7.3 Execution Flow (Strategy → Policy → Executor)
+### 7.3 Execution Flow (Strategy → Policy → Executor) - Partially Complete
 
-- [ ] StrategyRouter receives book update
-- [ ] Routes to MathArbStrategy.on_book_update()
-- [ ] Strategy returns `Vec<OrderIntent>`
-- [ ] ExecutionPolicy (TakerPolicy) converts to `OrderParams`
-- [ ] Executor submits both legs concurrently: `tokio::join!`
+- [x] StrategyRouter receives book update
+- [x] Routes to MathArbStrategy.on_book_update()
+- [x] Strategy returns `Vec<OrderIntent>`
+- [ ] ExecutionPolicy (TakerPolicy) converts to `OrderParams` ⏳ Phase 8
+- [ ] Executor submits both legs concurrently: `tokio::join!` ⏳ Phase 8
 
-### 7.4 Partial Fill Handling (via TakerPolicy)
+### 7.4 Partial Fill Handling (via TakerPolicy) ⏳ Deferred to Phase 8
 
 - [ ] If both filled equally → success
 - [ ] If partial fills unequal:
@@ -315,19 +318,62 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
   - [ ] Unwind the filled leg immediately
 - [ ] **Never hold unhedged position > 500ms**
 
-### 7.5 Risk Limits (Hard Guardrails)
+### 7.5 Risk Limits (Hard Guardrails) ✅
 
-- [ ] Max notional per market
-- [ ] Max total open exposure
-- [ ] Max outstanding orders (e.g., 10)
-- [ ] Max daily loss → stop trading
-- [ ] Max partial-fill exposure
+- [x] Max notional per market
+- [x] Max total open exposure
+- [x] Max outstanding orders (e.g., 10)
+- [x] Max daily loss → stop trading
+- [x] Max partial-fill exposure
 
-**Deliverable:** Bot executing math arb via Strategy trait with proper partial fill handling (small sizes)
+**Deliverable:** ✅ MathArbStrategy with dynamic edge detection, intent generation (115 tests)
 
 ---
 
-## Phase 8: Edge Expansion (Additional Strategies)
+## Phase 7.5: API Fix & Market Discovery ✅ COMPLETED
+
+### 7.5.1 Gamma API Client ✅
+
+- [x] Implement `GammaClient` in `src/api/gamma.rs`
+- [x] Parse `GammaEvent` and `GammaMarket` types
+- [x] Handle stringified JSON fields (outcomes, clobTokenIds)
+- [x] Custom deserializer for mixed string/number fields
+
+### 7.5.2 Slug-Based Discovery ✅
+
+- [x] Implement `discover_crypto_15min_markets()`
+- [x] Generate slug patterns: `{asset}-updown-15m-{timestamp}`
+- [x] Support BTC, ETH, SOL assets
+- [x] Query current + next 2 time intervals
+
+### 7.5.3 Market Discovery Integration ✅
+
+- [x] Implement `MarketDiscovery` in `src/api/discovery.rs`
+- [x] `DiscoveredMarket` struct with parsed tokens
+- [x] `to_market_pair()` conversion
+- [x] Update `main.rs` to use discovery on startup
+- [x] Bot auto-discovers live 15-min crypto markets
+
+### 7.5.4 Up/Down Market Support ✅
+
+- [x] `MarketPair::new_up_down()` constructor
+- [x] Generic `first_token_id` / `second_token_id` naming
+- [x] Compatibility aliases for `yes_token_id` / `no_token_id`
+
+**Deliverable:** ✅ Bot discovers and subscribes to live 15-min crypto markets (136 tests)
+
+---
+
+## Phase 8: Wire Execution Policies 🚧 IN PROGRESS
+
+### 8.0 Complete Execution Pipeline
+
+- [ ] Wire `TakerPolicy` / `MakerPolicy` into `Bot::handle_order_intents()`
+- [ ] Check circuit breaker before order submission
+- [ ] Convert `OrderIntent` → `OrderParams` via policy
+- [ ] Sign orders via `OrderSigner`
+- [ ] Submit to CLOB API via `ApiClient`
+- [ ] Track in `Ledger`
 
 ### 8.1 MakerRebateArbStrategy (Gabagool Strategy) - NEW
 
