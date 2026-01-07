@@ -1,6 +1,6 @@
 # Polymarket Bot - Complete Execution Plan
 
-## Current Status: Phase 4 Complete ✅
+## Current Status: Phase 6 Complete + Event-Driven Refactor ✅
 
 **Latest Update:** 2026-01-06
 
@@ -10,9 +10,10 @@
 - ✅ **Phase 2:** WebSocket Connectivity - Real-time market data streaming working
 - ✅ **Phase 3:** HTTP Client & Authentication - REST API + EIP-712 signing (25 tests passing)
 - ✅ **Phase 4:** Ledger & State Machine - Authoritative portfolio state (56 tests passing)
-- 🚧 **Phase 5:** Risk and circuit breaker - NEXT
-- ⏸️ **Phase 6:** Strategy framework
-- ⏸️ **Phase 7:** Math arb strategy (MVP)
+- ✅ **Phase 5:** Risk Management - Circuit breaker, limits, reconciliation (75 tests passing)
+- ✅ **Phase 6:** Strategy Framework - Traits, router, executor, policies (94 tests passing)
+- ✅ **Event-Driven Refactor:** tokio::select! architecture, <1ms latency
+- 🚧 **Phase 7:** Math arb strategy (MVP) - NEXT
 - ⏸️ **Phase 8:** Maker rebate strategy
 - ⏸️ **Phase 9:** Integration and live testing
 - ⏸️ **Phase 10:** Monitoring and deployment
@@ -23,13 +24,16 @@
 - Order book state tracking with lock-free DashMap
 - Ledger system: orders, positions, cash tracking
 - Order state machine with lifecycle management
-- Bot module properly orchestrating all components
-- Clean separation: main.rs (86 lines), bot.rs (140 lines)
-- Kill switch with 3 trigger methods working
+- Bot module with event-driven tokio::select! architecture
+- Clean separation: main.rs (86 lines), bot.rs (~270 lines)
+- Kill switch with async Notify + file watcher
 - HTTP client with connection pooling and optimized settings
 - HMAC authentication for REST API
 - EIP-712 order signing with alloy (verified hash constants)
-- All tests passing (56 unit tests)
+- Risk management: circuit breaker, position limits, loss limits
+- Strategy framework: traits, router, executor with policies
+- Event-driven architecture: <1ms latency, efficient async
+- All tests passing (94 unit tests)
 
 ---
 

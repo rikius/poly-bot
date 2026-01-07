@@ -39,7 +39,7 @@ impl OrderBookState {
         }
     }
 
-    /// Update order book from WebSocket message
+    /// Update order book from WebSocket message (full snapshot)
     pub fn update_book(
         &self,
         token_id: TokenId,
@@ -59,6 +59,88 @@ impl OrderBookState {
         };
 
         self.books.insert(token_id, snapshot);
+    }
+
+    /// Update a single price level (incremental update from price_change)
+    ///
+    /// If size is "0", removes the level. Otherwise, updates or inserts.
+    /// Maintains sorted order: bids descending by price, asks ascending.
+    pub fn update_level(
+        &self,
+        token_id: &TokenId,
+        market: String,
+        side: &str,
+        price: &str,
+        size: &str,
+        timestamp: Option<i64>,
+        hash: Option<String>,
+    ) {
+        // Get or create the book
+        let mut entry = self.books.entry(token_id.clone()).or_insert_with(|| {
+            BookSnapshot {
+                token_id: token_id.clone(),
+                market: market.clone(),
+                bids: Vec::new(),
+                asks: Vec::new(),
+                last_update: timestamp,
+                hash: None,
+            }
+        });
+
+        let book = entry.value_mut();
+        book.last_update = timestamp;
+        book.hash = hash;
+
+        let price_decimal: Decimal = match price.parse() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let size_decimal: Decimal = match size.parse() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        let levels = match side.to_uppercase().as_str() {
+            "BUY" => &mut book.bids,
+            "SELL" => &mut book.asks,
+            _ => return,
+        };
+
+        // Find existing level at this price
+        let existing_idx = levels.iter().position(|l| {
+            l.price.parse::<Decimal>().map(|p| p == price_decimal).unwrap_or(false)
+        });
+
+        if size_decimal.is_zero() {
+            // Remove the level
+            if let Some(idx) = existing_idx {
+                levels.remove(idx);
+            }
+        } else {
+            let new_level = PriceLevel {
+                price: price.to_string(),
+                size: size.to_string(),
+            };
+
+            if let Some(idx) = existing_idx {
+                // Update existing level
+                levels[idx] = new_level;
+            } else {
+                // Insert in sorted order
+                let insert_idx = if side.to_uppercase() == "BUY" {
+                    // Bids: descending order (highest first)
+                    levels.iter().position(|l| {
+                        l.price.parse::<Decimal>().map(|p| p < price_decimal).unwrap_or(true)
+                    }).unwrap_or(levels.len())
+                } else {
+                    // Asks: ascending order (lowest first)
+                    levels.iter().position(|l| {
+                        l.price.parse::<Decimal>().map(|p| p > price_decimal).unwrap_or(true)
+                    }).unwrap_or(levels.len())
+                };
+                levels.insert(insert_idx, new_level);
+            }
+        }
     }
 
     /// Get current book snapshot for a token
