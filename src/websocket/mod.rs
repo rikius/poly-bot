@@ -8,5 +8,5 @@ pub mod market;
 pub mod user;
 
 pub use market::{MarketWebSocket, MarketMessage, BookUpdateMessage, LevelUpdateMessage};
-pub use user::{UserWebSocket, UserMessage, TradeNotification};
+pub use user::{UserWebSocket, UserMessage, TradeNotification, OrderUpdate};
 

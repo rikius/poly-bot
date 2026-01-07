@@ -323,6 +323,80 @@ impl ExecutionPolicy for MakerPolicy {
 }
 
 // ============================================================================
+// DUAL POLICY - Selects between taker and maker based on urgency
+// ============================================================================
+
+/// Dual execution policy that routes to taker or maker based on urgency
+///
+/// This allows the bot to use both execution styles:
+/// - Urgency::Immediate/Normal → TakerPolicy (FOK/FAK for immediate fills)
+/// - Urgency::Passive → MakerPolicy (GTC for maker rebates)
+pub struct DualPolicy {
+    /// Taker policy for immediate execution
+    taker: TakerPolicy,
+
+    /// Maker policy for passive execution
+    maker: MakerPolicy,
+}
+
+impl DualPolicy {
+    /// Create a new dual policy with default taker and maker policies
+    pub fn new() -> Self {
+        Self {
+            taker: TakerPolicy::new(),
+            maker: MakerPolicy::new(),
+        }
+    }
+
+    /// Create with custom maker price offset (cents inside spread)
+    pub fn with_maker_offset(mut self, price_offset_cents: Decimal) -> Self {
+        self.maker = self.maker.with_price_offset(price_offset_cents);
+        self
+    }
+
+    /// Create with custom taker expiration
+    pub fn with_taker_expiration(mut self, secs: u64) -> Self {
+        self.taker = self.taker.with_expiration(secs);
+        self
+    }
+
+    /// Create with custom maker expiration
+    pub fn with_maker_expiration(mut self, secs: u64) -> Self {
+        self.maker = self.maker.with_expiration(secs);
+        self
+    }
+}
+
+impl Default for DualPolicy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ExecutionPolicy for DualPolicy {
+    fn name(&self) -> &str {
+        "DualPolicy"
+    }
+
+    fn to_order_params(&self, intent: &IntentRef) -> OrderParams {
+        match intent.urgency {
+            // Immediate/Normal → use taker for fast execution
+            Urgency::Immediate | Urgency::Normal => self.taker.to_order_params(intent),
+
+            // Passive → use maker for zero fees
+            Urgency::Passive => self.maker.to_order_params(intent),
+        }
+    }
+
+    fn on_partial_fill(&self, intent: &IntentRef, filled_size: Decimal) -> PartialFillAction {
+        match intent.urgency {
+            Urgency::Immediate | Urgency::Normal => self.taker.on_partial_fill(intent, filled_size),
+            Urgency::Passive => self.maker.on_partial_fill(intent, filled_size),
+        }
+    }
+}
+
+// ============================================================================
 // TESTS
 // ============================================================================
 
@@ -486,5 +560,69 @@ mod tests {
         let params = policy.to_order_params(&intent);
 
         assert!(params.expiration > 0);
+    }
+
+    // ========================================================================
+    // Dual Policy Tests
+    // ========================================================================
+
+    #[test]
+    fn test_dual_immediate_uses_taker() {
+        let policy = DualPolicy::new();
+        let intent = test_intent(Urgency::Immediate, None);
+
+        let params = policy.to_order_params(&intent);
+
+        // Immediate should use FOK (taker)
+        assert_eq!(params.order_type, OrderType::FOK);
+    }
+
+    #[test]
+    fn test_dual_normal_uses_taker() {
+        let policy = DualPolicy::new();
+        let intent = test_intent(Urgency::Normal, None);
+
+        let params = policy.to_order_params(&intent);
+
+        // Normal should use FAK (taker)
+        assert_eq!(params.order_type, OrderType::FAK);
+    }
+
+    #[test]
+    fn test_dual_passive_uses_maker() {
+        let policy = DualPolicy::new();
+        let intent = test_intent(Urgency::Passive, None);
+
+        let params = policy.to_order_params(&intent);
+
+        // Passive should use GTC (maker)
+        assert_eq!(params.order_type, OrderType::GTC);
+    }
+
+    #[test]
+    fn test_dual_passive_with_offset() {
+        let policy = DualPolicy::new().with_maker_offset(dec!(0.5)); // 0.5 cents
+        let intent = test_intent(Urgency::Passive, None); // Buy at 0.55
+
+        let params = policy.to_order_params(&intent);
+
+        // Buy price should be adjusted (0.55 + 0.005 = 0.555)
+        assert_eq!(params.price, dec!(0.555));
+        assert_eq!(params.order_type, OrderType::GTC);
+    }
+
+    #[test]
+    fn test_dual_partial_fill_routes_correctly() {
+        let policy = DualPolicy::new();
+
+        // Immediate (taker) - should cancel or unwind
+        let taker_intent = test_intent(Urgency::Immediate, None);
+        let taker_action = policy.on_partial_fill(&taker_intent, dec!(50));
+        assert_eq!(taker_action, PartialFillAction::CancelRemainder);
+
+        // Passive (maker) - should keep remainder
+        let maker_intent = test_intent(Urgency::Passive, None);
+        let maker_action = policy.on_partial_fill(&maker_intent, dec!(50));
+        assert_eq!(maker_action, PartialFillAction::KeepRemainder);
     }
 }

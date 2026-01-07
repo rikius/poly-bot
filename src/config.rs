@@ -26,6 +26,14 @@ pub struct Config {
     // Risk limits
     pub max_daily_loss_usd: Decimal,
     pub max_open_orders: u32,
+
+    // Maker strategy configuration
+    /// Use maker execution (GTC orders, zero fees)
+    pub use_maker_mode: bool,
+    /// Price offset for maker orders (cents inside spread)
+    pub maker_price_offset: Decimal,
+    /// TTL for maker orders before cancellation (seconds)
+    pub maker_order_ttl_secs: u64,
 }
 
 /// Operating mode for the bot
@@ -84,6 +92,16 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(10);
 
+        // Maker strategy configuration
+        let use_maker_mode = std::env::var("USE_MAKER_MODE")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        let maker_price_offset = env_decimal("MAKER_PRICE_OFFSET", Decimal::new(5, 1)); // 0.5 cents default
+        let maker_order_ttl_secs = std::env::var("MAKER_ORDER_TTL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(120); // 2 minutes default
+
         Ok(Config {
             api_key,
             secret_key: secret_key.trim_matches('"').to_string(),
@@ -97,6 +115,9 @@ impl Config {
             max_total_exposure_usd,
             max_daily_loss_usd,
             max_open_orders,
+            use_maker_mode,
+            maker_price_offset,
+            maker_order_ttl_secs,
         })
     }
 

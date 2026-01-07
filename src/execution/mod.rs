@@ -3,17 +3,23 @@
 //! ## Architecture
 //!
 //! - `state_machine`: Order state transitions and ledger invariants
-//! - `policy`: Execution policies (TakerPolicy, MakerPolicy)
+//! - `policy`: Execution policies (TakerPolicy, MakerPolicy, DualPolicy)
 //! - `executor`: Converts OrderIntent → orders and submits
+//! - `order_tracker`: Tracks outstanding GTC orders
+//! - `cancellation`: Manages order cancellation
 //!
 //! ## Flow
 //!
 //! 1. Strategy returns `OrderIntent` (WHAT it wants)
 //! 2. `ExecutionPolicy` converts to `OrderParams` (HOW to execute)
 //! 3. `OrderExecutor` signs and submits orders
-//! 4. Policy handles partial fills per strategy needs
+//! 4. `OrderTracker` tracks outstanding GTC orders
+//! 5. `CancellationManager` handles cleanup
+//! 6. Policy handles partial fills per strategy needs
 
+pub mod cancellation;
 pub mod executor;
+pub mod order_tracker;
 pub mod policy;
 pub mod state_machine;
 
@@ -25,8 +31,15 @@ pub use state_machine::{
 
 // Re-export policy types
 pub use policy::{
-    ExecutionPolicy, IntentRef, MakerPolicy, OrderParams, PartialFillAction, TakerPolicy,
+    DualPolicy, ExecutionPolicy, IntentRef, MakerPolicy, OrderParams, PartialFillAction,
+    TakerPolicy,
 };
 
 // Re-export executor types
 pub use executor::{ExecutionResult, ExecutionStatus, OrderExecutor};
+
+// Re-export order tracker types
+pub use order_tracker::{OrderTracker, TrackedOrder};
+
+// Re-export cancellation types
+pub use cancellation::CancellationManager;

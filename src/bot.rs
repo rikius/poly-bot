@@ -15,21 +15,25 @@
 //! - Heartbeat for logging (10s)
 //! - Async kill signal for shutdown
 
-use crate::config::Config;
+use crate::api::ApiClient;
+use crate::config::{Config, OperatingMode};
+use crate::execution::{DualPolicy, ExecutionResult, ExecutionStatus, OrderExecutor, OrderTracker};
 use crate::kill_switch::KillSwitch;
 use crate::ledger::Ledger;
+use crate::risk::CircuitBreaker;
+use crate::signing::OrderSigner;
 use crate::state::OrderBookState;
 use crate::strategy::{
     MarketPair, MarketPairRegistry, MathArbStrategy, OrderIntent, StrategyContext, StrategyRouter,
 };
-use crate::websocket::{MarketMessage, MarketWebSocket};
+use crate::websocket::{MarketMessage, MarketWebSocket, UserMessage, UserWebSocket};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Main bot struct that orchestrates all components
 pub struct Bot {
@@ -45,10 +49,20 @@ pub struct Bot {
     market_registry: Arc<MarketPairRegistry>,
     /// Strategy router
     strategy_router: Arc<StrategyRouter>,
+    /// Circuit breaker for risk management
+    circuit_breaker: Arc<CircuitBreaker>,
+    /// Order executor for submitting trades
+    executor: Arc<OrderExecutor>,
+    /// Order tracker for outstanding GTC orders
+    order_tracker: Arc<OrderTracker>,
     /// Market WebSocket message receiver
     market_ws_rx: mpsc::UnboundedReceiver<MarketMessage>,
     /// Market WebSocket task handle
     market_ws_task: JoinHandle<()>,
+    /// User WebSocket message receiver
+    user_ws_rx: mpsc::UnboundedReceiver<UserMessage>,
+    /// User WebSocket task handle
+    user_ws_task: JoinHandle<()>,
     /// Last log time per token (for rate limiting)
     last_log_time: HashMap<String, Instant>,
     /// Message counter per token
@@ -57,6 +71,10 @@ pub struct Bot {
     total_messages: u64,
     /// Total order intents generated
     total_intents: u64,
+    /// Total orders executed
+    total_executions: u64,
+    /// Total fills received
+    total_fills: u64,
 }
 
 impl Bot {
@@ -86,11 +104,64 @@ impl Bot {
         // Set up strategy router
         let strategy_router = Arc::new(StrategyRouter::new());
 
-        // Register MathArbStrategy
-        let math_arb = Arc::new(MathArbStrategy::new(market_registry.clone()));
+        // Register MathArbStrategy with appropriate config
+        let arb_config = if config.use_maker_mode {
+            info!("Using MAKER mode for arb strategy (1% min edge, GTC orders, 0% fees)");
+            crate::strategy::MathArbConfig::maker()
+        } else {
+            info!("Using TAKER mode for arb strategy (3% min edge, FOK orders)");
+            crate::strategy::MathArbConfig::taker()
+        };
+        let math_arb = Arc::new(MathArbStrategy::with_config(market_registry.clone(), arb_config));
         if let Err(e) = strategy_router.register(math_arb) {
             warn!("Failed to register MathArbStrategy: {}", e);
         }
+
+        // Set up circuit breaker for risk management
+        let circuit_breaker = Arc::new(CircuitBreaker::new());
+
+        // Set up order executor
+        let credentials = crate::api::ApiCredentials::new(
+            config.api_key.clone(),
+            config.secret_key.clone(),
+            config.passphrase.clone(),
+            config.wallet_address.clone(),
+        );
+        
+        let api_client = Arc::new(
+            ApiClient::new(credentials)
+                .expect("Failed to create API client")
+        );
+        
+        let order_signer = Arc::new(
+            OrderSigner::new(&config.private_key)
+                .expect("Failed to create order signer")
+        );
+        
+        // Use DualPolicy: Taker for Immediate/Normal, Maker for Passive
+        // Maker orders post inside spread for better fill probability
+        let policy = Arc::new(
+            DualPolicy::new()
+                .with_maker_offset(config.maker_price_offset)
+        );
+        
+        info!(
+            "Execution policy: DualPolicy (Taker=FOK/FAK, Maker=GTC offset={} cents)",
+            config.maker_price_offset
+        );
+        
+        // Note: 15-min crypto markets use neg-risk exchange
+        let executor = Arc::new(OrderExecutor::new(
+            api_client,
+            order_signer,
+            policy,
+            circuit_breaker.clone(),
+            config.wallet_address.clone(),
+            true, // is_neg_risk for 15-min crypto markets
+        ));
+
+        // Set up order tracker for outstanding orders
+        let order_tracker = Arc::new(OrderTracker::new());
 
         // Set up Market WebSocket for order book data
         let (market_ws_tx, market_ws_rx) = mpsc::unbounded_channel();
@@ -100,6 +171,21 @@ impl Bot {
         let market_ws_clone = market_ws.clone();
         let market_ws_task = tokio::spawn(async move {
             market_ws_clone.run().await;
+        });
+
+        // Set up User WebSocket for fill notifications
+        let (user_ws_tx, user_ws_rx) = mpsc::unbounded_channel();
+        let user_ws = Arc::new(UserWebSocket::new(
+            config.api_key.clone(),
+            config.secret_key.clone(),
+            config.passphrase.clone(),
+            user_ws_tx,
+        ));
+
+        // Spawn User WebSocket task
+        let user_ws_clone = user_ws.clone();
+        let user_ws_task = tokio::spawn(async move {
+            user_ws_clone.run().await;
         });
 
         info!(
@@ -116,12 +202,19 @@ impl Bot {
             ledger,
             market_registry,
             strategy_router,
+            circuit_breaker,
+            executor,
+            order_tracker,
             market_ws_rx,
             market_ws_task,
+            user_ws_rx,
+            user_ws_task,
             last_log_time: HashMap::new(),
             message_counts: HashMap::new(),
             total_messages: 0,
             total_intents: 0,
+            total_executions: 0,
+            total_fills: 0,
         }
     }
 
@@ -129,6 +222,7 @@ impl Bot {
     ///
     /// Uses `tokio::select!` for zero-latency event handling:
     /// - Market WS: Processed instantly when received
+    /// - User WS: Fill notifications processed instantly
     /// - Tick: Every 100ms for strategy periodic logic
     /// - Heartbeat: Every 10s for logging/monitoring
     /// - Kill signal: Async shutdown trigger
@@ -149,6 +243,11 @@ impl Bot {
                 // Market WebSocket messages - highest priority, zero latency
                 Some(msg) = self.market_ws_rx.recv() => {
                     self.handle_market_message(msg).await;
+                }
+
+                // User WebSocket messages - fill notifications
+                Some(msg) = self.user_ws_rx.recv() => {
+                    self.handle_user_message(msg).await;
                 }
 
                 // Strategy tick - 100ms periodic
@@ -193,6 +292,82 @@ impl Bot {
         }
     }
 
+    /// Handle a user WebSocket message (fills, order updates)
+    async fn handle_user_message(&mut self, msg: UserMessage) {
+        match msg {
+            UserMessage::Connected => {
+                info!("User WebSocket connected - receiving fill notifications");
+            }
+            UserMessage::Reconnecting => {
+                warn!("User WebSocket reconnecting...");
+            }
+            UserMessage::Trade(trade) => {
+                self.handle_trade_notification(trade).await;
+            }
+            UserMessage::OrderUpdate(update) => {
+                self.handle_order_update(update).await;
+            }
+        }
+    }
+
+    /// Handle a trade/fill notification
+    async fn handle_trade_notification(&mut self, trade: crate::websocket::TradeNotification) {
+        self.total_fills += 1;
+
+        // Convert to Fill and record in ledger
+        match trade.to_fill() {
+            Ok(fill) => {
+                info!(
+                    "💰 Fill: {} {} {} @ ${} (fee: ${})",
+                    format!("{:?}", fill.side),
+                    fill.size,
+                    &fill.token_id[..fill.token_id.len().min(12)],
+                    fill.price,
+                    fill.fee
+                );
+
+                // Record fill in ledger
+                self.ledger.process_fill(fill.clone());
+
+                // Update order tracker
+                if let Some(remaining) = self.order_tracker.on_fill(&fill.order_id, fill.size) {
+                    if remaining.is_zero() {
+                        info!("Order {} fully filled", &fill.order_id[..fill.order_id.len().min(12)]);
+                    } else {
+                        debug!("Order {} partial fill, {} remaining", &fill.order_id[..fill.order_id.len().min(12)], remaining);
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Failed to parse trade notification: {}", e);
+            }
+        }
+    }
+
+    /// Handle an order update (ack, cancel, etc.)
+    async fn handle_order_update(&mut self, update: crate::websocket::OrderUpdate) {
+        debug!(
+            "Order update: {} -> {}",
+            &update.order_id[..update.order_id.len().min(12)],
+            update.status
+        );
+
+        // Handle order status changes
+        match update.status.to_lowercase().as_str() {
+            "cancelled" | "canceled" => {
+                self.order_tracker.remove(&update.order_id);
+                info!("Order {} cancelled", &update.order_id[..update.order_id.len().min(12)]);
+            }
+            "expired" => {
+                self.order_tracker.remove(&update.order_id);
+                info!("Order {} expired", &update.order_id[..update.order_id.len().min(12)]);
+            }
+            _ => {
+                // Other statuses (acked, etc.) - just log
+            }
+        }
+    }
+
     /// Handle periodic tick (100ms)
     async fn handle_tick(&mut self) {
         // Create strategy context
@@ -209,12 +384,29 @@ impl Bot {
 
     /// Log heartbeat with current stats
     fn log_heartbeat(&mut self) {
+        let mode_str = match self.config.mode {
+            OperatingMode::Paper => "PAPER",
+            OperatingMode::Live => "LIVE",
+        };
+        let circuit_status = if self.circuit_breaker.is_trading_allowed() {
+            "✅"
+        } else {
+            "🔴 OPEN"
+        };
+        
+        let active_orders = self.order_tracker.active_count();
+        
         info!(
-            "Heartbeat: {} markets | {} msgs | {:.1} msg/s | {} intents",
+            "Heartbeat [{}]: {} markets | {} msgs | {:.1} msg/s | {} intents | {} execs | {} fills | {} active | CB: {}",
+            mode_str,
             self.order_book_state.num_markets(),
             self.total_messages,
             self.total_messages as f64 / 10.0,  // msgs per second (over 10s window)
-            self.total_intents
+            self.total_intents,
+            self.total_executions,
+            self.total_fills,
+            active_orders,
+            circuit_status
         );
         // Reset counter for next interval
         self.total_messages = 0;
@@ -280,28 +472,163 @@ impl Bot {
         self.total_intents += intents.len() as u64;
 
         for intent in &intents {
+            let exec_mode = match intent.urgency {
+                crate::strategy::Urgency::Immediate => "TAKER/FOK",
+                crate::strategy::Urgency::Normal => "TAKER/FAK",
+                crate::strategy::Urgency::Passive => "MAKER/GTC",
+            };
             info!(
-                "📝 Intent: {} {} {} @ ${:.4} x {} [{}]",
+                "📝 Intent: {} {} {} @ ${:.4} x {} [{}] → {}",
                 intent.strategy_name,
                 format!("{:?}", intent.side),
                 &intent.token_id[..intent.token_id.len().min(12)],
                 intent.price,
                 intent.size,
-                intent.reason
+                intent.reason,
+                exec_mode
             );
         }
 
-        // TODO: In Phase 7 full integration:
-        // 1. Check circuit breaker
-        // 2. Apply execution policy (TakerPolicy/MakerPolicy)
-        // 3. Sign and submit orders via executor
-        // 4. Track in ledger
-        //
-        // For now, we just log the intents (paper trading mode)
-        debug!(
-            "Generated {} intent(s) - paper trading mode, not executing",
-            intents.len()
-        );
+        // Check circuit breaker first
+        if !self.circuit_breaker.is_trading_allowed() {
+            warn!("⚠️ Circuit breaker OPEN - not executing {} intent(s)", intents.len());
+            return;
+        }
+
+        // Check operating mode
+        match self.config.mode {
+            OperatingMode::Paper => {
+                info!(
+                    "📋 PAPER MODE: Would execute {} order(s) - not submitting",
+                    intents.len()
+                );
+                // In paper mode, we just log what would happen
+                for intent in &intents {
+                    info!(
+                        "  [PAPER] {} {} @ ${:.4} x {}",
+                        format!("{:?}", intent.side),
+                        &intent.token_id[..intent.token_id.len().min(16)],
+                        intent.price,
+                        intent.size
+                    );
+                }
+            }
+            OperatingMode::Live => {
+                // Spawn execution as background task to not block event loop
+                let executor = self.executor.clone();
+                let circuit_breaker = self.circuit_breaker.clone();
+                let intents_owned = intents.clone();
+                
+                tokio::spawn(async move {
+                    Self::execute_intents(executor, circuit_breaker, intents_owned).await;
+                });
+                
+                self.total_executions += intents.len() as u64;
+            }
+        }
+    }
+
+    /// Execute intents asynchronously (called from spawned task)
+    async fn execute_intents(
+        executor: Arc<OrderExecutor>,
+        circuit_breaker: Arc<CircuitBreaker>,
+        intents: Vec<OrderIntent>,
+    ) {
+        info!("🚀 LIVE: Executing {} order(s)...", intents.len());
+        
+        // Check if intents are grouped (arb legs)
+        let has_group = intents.first().and_then(|i| i.group_id.as_ref()).is_some();
+        
+        let results = if has_group {
+            // Execute as grouped orders (handles partial fills)
+            executor.execute_grouped(&intents).await
+        } else {
+            // Execute as batch (concurrent but independent)
+            executor.execute_batch(&intents).await
+        };
+        
+        // Process results
+        for (intent, result) in intents.iter().zip(results.iter()) {
+            Self::handle_execution_result(intent, result, &circuit_breaker);
+        }
+    }
+
+    /// Handle the result of an execution
+    fn handle_execution_result(
+        intent: &OrderIntent,
+        result: &ExecutionResult,
+        circuit_breaker: &CircuitBreaker,
+    ) {
+        match result.status {
+            ExecutionStatus::FullyFilled => {
+                info!(
+                    "✅ FILLED: {} {} @ {} x {} (order: {})",
+                    format!("{:?}", intent.side),
+                    &intent.token_id[..intent.token_id.len().min(16)],
+                    intent.price,
+                    result.filled_size,
+                    result.order_id.as_deref().unwrap_or("?")
+                );
+                circuit_breaker.record_order_result(None);
+            }
+            ExecutionStatus::PartialFill => {
+                warn!(
+                    "⚠️ PARTIAL: {} {} @ {} - filled {}/{} (order: {})",
+                    format!("{:?}", intent.side),
+                    &intent.token_id[..intent.token_id.len().min(16)],
+                    intent.price,
+                    result.filled_size,
+                    result.requested_size,
+                    result.order_id.as_deref().unwrap_or("?")
+                );
+                circuit_breaker.record_order_result(None);
+            }
+            ExecutionStatus::Pending => {
+                info!(
+                    "⏳ PENDING: {} {} @ {} (order: {})",
+                    format!("{:?}", intent.side),
+                    &intent.token_id[..intent.token_id.len().min(16)],
+                    intent.price,
+                    result.order_id.as_deref().unwrap_or("?")
+                );
+            }
+            ExecutionStatus::Rejected => {
+                error!(
+                    "❌ REJECTED: {} {} @ {} - {}",
+                    format!("{:?}", intent.side),
+                    &intent.token_id[..intent.token_id.len().min(16)],
+                    intent.price,
+                    result.error.as_deref().unwrap_or("unknown error")
+                );
+                circuit_breaker.record_order_result(Some(crate::error::ErrorType::Expected));
+            }
+            ExecutionStatus::Cancelled => {
+                info!(
+                    "🚫 CANCELLED: {} {} @ {} (FOK not filled)",
+                    format!("{:?}", intent.side),
+                    &intent.token_id[..intent.token_id.len().min(16)],
+                    intent.price,
+                );
+            }
+            ExecutionStatus::SubmissionFailed => {
+                error!(
+                    "💥 FAILED: {} {} @ {} - {}",
+                    format!("{:?}", intent.side),
+                    &intent.token_id[..intent.token_id.len().min(16)],
+                    intent.price,
+                    result.error.as_deref().unwrap_or("submission failed")
+                );
+                circuit_breaker.record_order_result(Some(crate::error::ErrorType::Retryable));
+            }
+            ExecutionStatus::CircuitOpen => {
+                warn!(
+                    "🔴 CIRCUIT OPEN: {} {} @ {} - trading halted",
+                    format!("{:?}", intent.side),
+                    &intent.token_id[..intent.token_id.len().min(16)],
+                    intent.price,
+                );
+            }
+        }
     }
 
     /// Log current book state (rate limited - max 1 per second per token)
@@ -358,13 +685,19 @@ impl Bot {
             self.process_intents(shutdown_intents);
         }
 
-        // Abort Market WebSocket task
+        // Abort WebSocket tasks
         self.market_ws_task.abort();
+        self.user_ws_task.abort();
+
+        // Log order tracker status
+        self.order_tracker.log_status();
 
         // Log final stats
         info!(
-            "Final stats: {} total intents generated",
-            self.total_intents
+            "Final stats: {} intents | {} executions | {} fills",
+            self.total_intents,
+            self.total_executions,
+            self.total_fills
         );
 
         info!("Bot shutdown complete");

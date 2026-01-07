@@ -180,25 +180,50 @@ impl UserWebSocket {
 
     /// Start the WebSocket connection with automatic reconnection
     pub async fn run(self: Arc<Self>) {
-        let mut reconnect_delay = Duration::from_millis(WEBSOCKET_RECONNECT_DELAY_MS);
-        const MAX_BACKOFF: Duration = Duration::from_secs(30);
+        let mut reconnect_delay = Duration::from_secs(30); // Start with 30 second delay  
+        const MAX_BACKOFF: Duration = Duration::from_secs(300); // Max 5 minutes
+        let mut consecutive_failures = 0u32;
+        const MAX_CONSECUTIVE_FAILURES: u32 = 3;
 
         loop {
-            info!("Connecting to user WebSocket: {}", USER_WS_URL);
+            if consecutive_failures == 0 {
+                info!("Connecting to user WebSocket: {}", USER_WS_URL);
+            } else {
+                debug!("Reconnecting to user WebSocket (attempt {}/{})", consecutive_failures + 1, MAX_CONSECUTIVE_FAILURES);
+            }
 
             match self.connect_and_run().await {
                 Ok(_) => {
-                    warn!("User WebSocket connection closed normally");
-                    reconnect_delay = Duration::from_millis(WEBSOCKET_RECONNECT_DELAY_MS);
+                    debug!("User WebSocket connection closed normally");
+                    reconnect_delay = Duration::from_secs(30);
+                    consecutive_failures = 0;
                 }
                 Err(e) => {
-                    error!("User WebSocket error: {}", e);
+                    consecutive_failures += 1;
+                    
+                    // Only log as error for first failure
+                    if consecutive_failures == 1 {
+                        warn!("User WebSocket error: {} (will retry in background)", e);
+                    } else {
+                        debug!("User WebSocket error (attempt {}): {}", consecutive_failures, e);
+                    }
+                    
                     let _ = self.fill_tx.send(UserMessage::Reconnecting);
 
-                    // Exponential backoff
-                    warn!("Reconnecting in {:?}", reconnect_delay);
-                    tokio::time::sleep(reconnect_delay).await;
-                    reconnect_delay = (reconnect_delay * 2).min(MAX_BACKOFF);
+                    // After too many failures, give up and stop retrying
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                        warn!(
+                            "User WebSocket unavailable after {} attempts. Fill notifications disabled. Bot will continue without real-time fills.",
+                            consecutive_failures
+                        );
+                        // Stop trying - the bot works fine without this
+                        return;
+                    } else {
+                        // Exponential backoff
+                        debug!("Reconnecting in {:?}", reconnect_delay);
+                        tokio::time::sleep(reconnect_delay).await;
+                        reconnect_delay = (reconnect_delay * 2).min(MAX_BACKOFF);
+                    }
                 }
             }
         }
@@ -235,10 +260,11 @@ impl UserWebSocket {
             .await
             .map_err(|e| BotError::WebSocket(format!("Failed to authenticate: {}", e)))?;
 
-        info!("User WebSocket authenticated");
+        debug!("User WebSocket auth message sent, waiting for response...");
 
         // Keepalive ping interval
         let mut ping_interval = interval(Duration::from_secs(WEBSOCKET_PING_INTERVAL_SEC));
+        let mut authenticated = false;
 
         loop {
             tokio::select! {
@@ -246,6 +272,14 @@ impl UserWebSocket {
                 Some(msg_result) = read.next() => {
                     match msg_result {
                         Ok(msg) => {
+                            // Log first message (auth response) at INFO level
+                            if !authenticated {
+                                if let Message::Text(ref text) = msg {
+                                    info!("User WebSocket auth response: {}", &text[..text.len().min(500)]);
+                                }
+                                authenticated = true;
+                                info!("User WebSocket authenticated successfully");
+                            }
                             if let Err(e) = self.handle_message(msg).await {
                                 error!("Failed to handle message: {}", e);
                             }

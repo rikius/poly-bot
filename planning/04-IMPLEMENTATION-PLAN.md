@@ -4,7 +4,7 @@
 
 ---
 
-## 🚀 Current Status: Phase 7.5 Complete (Updated: 2026-01-07)
+## 🚀 Current Status: Phase 8 Complete (Updated: 2026-01-07)
 
 ### ✅ Completed Phases
 
@@ -18,10 +18,11 @@
 - **Event-Driven Refactor:** tokio::select! architecture, <1ms latency
 - **Phase 7:** Math Arb Strategy (MVP) - Market pairs, edge calculator, MathArbStrategy (115 tests ✅)
 - **Phase 7.5:** API Fix & Market Discovery - Gamma API, slug-based discovery (136 tests ✅)
+- **Phase 8:** Wire Execution Policies - Full execution pipeline connected (136 tests ✅)
 
 ### 🚧 In Progress
 
-- **Phase 8:** Wire Execution Policies - Connect taker/maker to actual order submission
+- **Phase 9:** Integration & Live Testing - Test with real orders
 
 ### 📊 Metrics
 
@@ -30,9 +31,10 @@
 - **WebSocket:** Market data + User fills streaming
 - **Order Book:** Tracking markets with lock-free DashMap
 - **Ledger:** Orders, Positions, Cash tracking with DashMap
-- **Risk:** Circuit breaker, limits, reconciliation
+- **Risk:** Circuit breaker integrated in execution path
 - **Strategy:** MathArbStrategy with dynamic edge detection
 - **Discovery:** Auto-discovers 15-min crypto markets (BTC, ETH, SOL)
+- **Execution:** Full pipeline: Strategy → Policy → Executor → API
 - **Architecture:** Event-driven with tokio::select!, <1ms latency
 - **Code Quality:** Clean module separation
 
@@ -364,18 +366,39 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 
 ---
 
-## Phase 8: Wire Execution Policies 🚧 IN PROGRESS
+## Phase 8: Wire Execution Policies ✅ COMPLETED
 
-### 8.0 Complete Execution Pipeline
+### 8.0 Complete Execution Pipeline ✅
 
-- [ ] Wire `TakerPolicy` / `MakerPolicy` into `Bot::handle_order_intents()`
-- [ ] Check circuit breaker before order submission
-- [ ] Convert `OrderIntent` → `OrderParams` via policy
-- [ ] Sign orders via `OrderSigner`
-- [ ] Submit to CLOB API via `ApiClient`
-- [ ] Track in `Ledger`
+- [x] Wire `TakerPolicy` / `MakerPolicy` into `Bot::process_intents_async()`
+- [x] Check circuit breaker before order submission
+- [x] Convert `OrderIntent` → `OrderParams` via policy
+- [x] Sign orders via `OrderSigner`
+- [x] Submit to CLOB API via `ApiClient`
+- [x] Track in `Ledger`
+- [x] Paper mode vs Live mode support
+- [x] Execution result logging
 
-### 8.1 MakerRebateArbStrategy (Gabagool Strategy) - NEW
+**Deliverable:** ✅ Full execution pipeline: Strategy → Policy → Executor → API (136 tests)
+
+---
+
+## Phase 9: Integration & Live Testing 🚧 IN PROGRESS
+
+### 9.0 Live Testing
+
+- [ ] Test with `BOT_MODE=live` on funded wallet (small amounts)
+- [ ] Verify EIP-712 signing works with real orders
+- [ ] Test order cancellation flow
+- [ ] Monitor for arb opportunities and actual executions
+
+### 9.1 User WebSocket Integration
+
+- [ ] Wire User WebSocket to Bot event loop
+- [ ] Update ledger from actual fill notifications
+- [ ] Handle order status changes (acked, filled, cancelled)
+
+### 9.2 MakerRebateArbStrategy (Gabagool Strategy) - Deferred
 
 - [ ] Implement `Strategy` trait for `MakerRebateArbStrategy` in `src/strategy/maker_arb.rs`
 - [ ] Same arb logic as MathArb but with `Urgency::Passive` → GTC orders
@@ -392,7 +415,7 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - Zero fees + rebates = profitable at lower edge thresholds (~1% vs ~3%)
 - Lower fill rate but higher profit per trade
 
-### 8.2 External Price Feeds (for Temporal Arb)
+### 9.3 External Price Feeds (for Temporal Arb) - Deferred
 
 - [ ] Binance WebSocket connection in `src/feeds/binance.rs`
 - [ ] Coinbase WebSocket connection in `src/feeds/coinbase.rs`
