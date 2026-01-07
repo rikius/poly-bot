@@ -1,0 +1,65 @@
+[package]
+name = "polymarket_bot"
+version = "0.1.0"
+edition = "2021"
+description = "High-frequency Polymarket trading bot"
+authors = ["x0ponti"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full", "rt-multi-thread", "fs", "signal"] }
+
+# WebSocket
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures-util = "0.3"
+
+# HTTP client (optimized)
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "gzip"] }
+
+# JSON parsing (SIMD-optimized)
+simd-json = "0.13"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Ethereum signing (use latest v1.x - more stable)
+alloy = { version = "1", features = ["signers", "signer-local", "sol-types"] }
+
+# Concurrent data structures
+dashmap = "5.5"
+
+# Fixed-point arithmetic (no f64 for prices)
+rust_decimal = "1.33"
+rust_decimal_macros = "1.33"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID for order tracking
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# Configuration
+dotenvy = "0.15"
+
+# HMAC for API auth
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.21"
+hex = "0.4"
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,9 @@
+/target
+
+*.bin
+*.amb
+*.norg
+iso/
+*.iso
+.env
+.DS_Store
