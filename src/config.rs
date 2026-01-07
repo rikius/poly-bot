@@ -116,8 +116,6 @@ fn env_decimal(key: &str, default: Decimal) -> Decimal {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_operating_mode_default_paper() {
         // Without BOT_MODE set, should default to Paper

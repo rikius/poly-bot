@@ -7,7 +7,7 @@ What Was Built
 
   Phase 1: Project Foundation ✅
 
-  Location: /Users/pontidev/Developer/poly-bot/polymarket-bot/
+  Location: /Users/pontidev/Developer/poly-bot/
 
   Files Created:
   1. Cargo.toml - Dependencies configured
@@ -181,18 +181,63 @@ What Was Built
     - Noted deferred items (User WebSocket, Ledger → Phase 4)
 
   ---
+  Phase 3: HTTP Client & Authentication ✅
+
+  Files Created:
+  1. src/api/auth.rs - HMAC authentication
+    - ApiCredentials struct: api_key, secret, passphrase, wallet_address
+    - generate_signature(secret, timestamp, method, path, body) → Base64 HMAC-SHA256
+    - AuthHeaders struct for request headers
+    - 3 unit tests (all passing)
+  2. src/api/client.rs - Optimized HTTP client
+    - ApiClient struct with reqwest Client
+    - HTTP/2 with connection pooling (20 idle connections)
+    - TCP_NODELAY for immediate packet transmission
+    - Aggressive timeouts: 500ms request, 200ms connect
+    - get(), get_authenticated(), post_authenticated(), delete_authenticated()
+    - warm_connection() for connection warming
+    - ConnectionWarmer background task
+    - 3 unit tests (all passing)
+  3. src/api/endpoints.rs - REST API endpoint wrappers
+    - Public endpoints: get_time(), get_markets(), get_market(), get_book(), get_price(), get_midpoint(), get_fee_rate()
+    - Authenticated endpoints: get_orders(), get_orders_by_market(), get_orders_by_asset(), place_order(), cancel_order(), cancel_all_orders(), get_notifications()
+    - Response types: MarketInfo, TokenInfo, BookResponse, PriceResponse, MidpointResponse, TimeResponse, FeeRateResponse, OpenOrder, TradeNotification
+    - 3 unit tests (all passing)
+  4. src/signing/mod.rs - Signing module exports
+  5. src/signing/order.rs - EIP-712 order signing
+    - Order struct with all required fields
+    - OrderBuilder for fluent construction
+    - OrderSigner with alloy PrivateKeySigner
+    - EIP-712 domain separator for Polymarket CTF Exchange (Polygon chain ID 137)
+    - Support for both standard and neg-risk exchange contracts
+    - sign_order() async method → SignedOrder
+    - calculate_amounts() for BUY/SELL price/size conversion
+    - 9 unit tests (all passing)
+
+  Updated Files:
+  1. src/api/mod.rs - Added exports for auth, client, endpoints
+  2. src/lib.rs - Added signing module, exported ApiClient, ApiCredentials, Order, OrderBuilder, OrderSigner
+
+  Validation:
+  - ✅ cargo build succeeds (no warnings)
+  - ✅ cargo test passes (25 tests total, up from 8)
+  - ✅ HMAC signature generation works
+  - ✅ EIP-712 order signing compiles (needs live testing)
+  - ✅ HTTP client created with optimized settings
+
+  ---
   How to Run
 
-  cd /Users/pontidev/Developer/poly-bot/polymarket-bot
+  cd /Users/pontidev/Developer/poly-bot
 
   # Build
-  ~/.cargo/bin/cargo build
+  cargo build
 
   # Run tests
-  ~/.cargo/bin/cargo test -- --test-threads=1
+  cargo test -- --test-threads=1
 
   # Run bot
-  ~/.cargo/bin/cargo run
+  cargo run
 
   # Stop bot (any of these):
   touch /tmp/polybot_kill
@@ -202,23 +247,25 @@ What Was Built
   Ctrl+C
 
   ---
-  Next Steps: Phase 3 - HTTP Client & Authentication
+  Next Steps: Phase 4 - Ledger & State Machine
 
   What needs to be built:
-  1. src/api/client.rs - Optimized HTTP client
-    - HTTP/2 with connection pooling
-    - TCP_NODELAY, DNS caching
-    - Connection warming
-  2. src/api/auth.rs - HMAC authentication
-    - Generate signatures for API requests
-    - Headers: poly_address, poly_api_key, poly_passphrase, poly_signature, poly_timestamp
-  3. src/signing/order.rs - EIP-712 order signing
-    - Sign orders with private key using alloy
-    - Domain separator for Polymarket CTF Exchange
-  4. src/api/endpoints.rs - REST API wrappers
-    - GET /markets, /book, /orders
-    - POST /order
-    - DELETE /order/{id}
-  5. Integration - Add HTTP client to bot.rs
-    - Market discovery (fetch available markets)
-    - Place orders (for Phase 7)
+  1. src/ledger/orders.rs - OpenOrders tracking
+    - OrderState enum: CreatedLocal → Signed → Submitted → Acked → Filled
+    - TrackedOrder struct
+    - State transition validation
+  2. src/ledger/positions.rs - Position tracking
+    - Update ONLY from confirmed fills
+    - Track shares, avg_cost, realized_pnl
+  3. src/ledger/cash.rs - Cash balance
+    - available, reserved, total
+    - Reserve on ACKED, release on cancel/reject
+  4. src/ledger/reconciliation.rs - REST sync loop
+    - Every 2-5 minutes: GET /orders?status=open
+    - Handle discrepancies
+  5. src/execution/state_machine.rs - Order state transitions
+    - can_transition_to() validation
+    - check_invariants() for ledger consistency
+  6. src/websocket/user.rs - User WebSocket for fills
+    - Connect to wss://ws-subscriptions-clob.polymarket.com/ws/user
+    - Parse trade notifications

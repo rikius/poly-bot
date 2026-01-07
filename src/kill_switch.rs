@@ -99,19 +99,22 @@ pub async fn graceful_shutdown(kill_switch: Arc<KillSwitch>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::fs;
 
     #[test]
+    #[serial]
     fn test_kill_switch_default_not_killed() {
-        let ks = KillSwitch::new();
-        // Clean up any existing triggers
+        // Clean up any existing triggers BEFORE creating KillSwitch
         std::env::remove_var(KILL_SWITCH_ENV_VAR);
         let _ = fs::remove_file(KILL_SWITCH_FILE);
 
+        let ks = KillSwitch::new();
         assert!(!ks.is_killed());
     }
 
     #[test]
+    #[serial]
     fn test_kill_switch_manual_trigger() {
         let ks = KillSwitch::new();
         std::env::remove_var(KILL_SWITCH_ENV_VAR);
@@ -123,6 +126,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_kill_switch_env_var() {
         let ks = KillSwitch::new();
         let _ = fs::remove_file(KILL_SWITCH_FILE);
@@ -135,6 +139,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_kill_switch_file() {
         let ks = KillSwitch::new();
         ks.reset();
