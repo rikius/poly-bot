@@ -488,3 +488,113 @@ loop {
 - ✅ cargo build succeeds (no warnings)
 - ✅ WebSocket messages now visible in console
 - ✅ Both book snapshots and price changes handled
+
+---
+
+## Phase 7: Math Arb Strategy (MVP) ✅
+
+**Objective:** Implement mathematical arbitrage detection where YES + NO < $1.00 - required_edge
+and execute both legs atomically.
+
+### Files Created:
+
+1. **src/strategy/market_pair.rs** (~350 lines)
+   - `MarketPair` struct: Represents a binary market with YES/NO token pair
+   - Fields: market_id, yes_token_id, no_token_id, fee_rate_bps, description
+   - `MarketPairRegistry` using DashMap for lock-free concurrent access
+   - Methods: `register()`, `get_by_market()`, `get_by_token()`, `get_complement()`
+   - `is_token()`, `is_yes_token()`, `is_no_token()` helpers
+   - `is_crypto_15min()` detection for high-fee markets
+   - 7 unit tests (all passing)
+
+2. **src/strategy/edge_calculator.rs** (~200 lines)
+   - `EdgeCalculator` struct: Dynamic threshold calculation vs static ARB_THRESHOLD = 0.97
+   - Replaces hardcoded thresholds with fee-aware, liquidity-aware calculation
+   - Fields: base_fee_bps, slippage_per_1000, thin_book_penalty, min_edge, max_edge
+   - Methods: `required_edge()`, `estimate_slippage()`, `is_thin_book()`
+   - Formula: `required_edge = base_fee + slippage + thin_book_penalty`
+   - `quick_check()` fast path: if yes_ask + no_ask >= 1.0 - min_edge, no arb possible
+   - `is_profitable()` full check accounting for all costs
+   - 7 unit tests (all passing)
+
+3. **src/strategy/arbitrage.rs** (~400 lines)
+   - `ArbOpportunity` struct: Captured opportunity with yes_ask, no_ask, combined_cost, edge, max_size
+   - `MathArbStrategy` implements `Strategy` trait
+   - Config: `ArbConfig` with max_position_usd, min_edge, cooldown_ms, require_two_sided
+   - Fields: market_pairs registry, edge_calculator, last_trade_time, enabled flag
+   - **Core Logic:**
+     - `on_book_update()`: Finds market pair for token, gets both books, runs detection
+     - `detect_opportunity()`: Calculates combined cost, checks edge vs required_edge
+     - `calculate_arb_size()`: Min of available liquidity, position limit, cash
+     - `create_arb_intents()`: Returns 2 OrderIntents with same group_id (atomic execution)
+   - Uses `Urgency::Immediate` for FOK execution
+   - Cooldown mechanism to prevent rapid-fire trading
+   - Exposure limit per market
+   - 7 unit tests (all passing)
+
+### Files Updated:
+
+1. **src/strategy/mod.rs**
+   - Added: `pub mod arbitrage; pub mod edge_calculator; pub mod market_pair;`
+   - New exports: `MathArbStrategy, MarketPair, MarketPairRegistry, EdgeCalculator, ArbConfig`
+
+2. **src/bot.rs** (~400 lines, was ~270)
+   - Added imports: Ledger, StrategyRouter, MarketPair, MarketPairRegistry, MathArbStrategy
+   - New fields: `ledger: Ledger`, `strategy_router: StrategyRouter`, `market_pairs: Arc<MarketPairRegistry>`
+   - Modified `Bot::new()`:
+     - Accepts `market_pairs: Vec<MarketPair>` parameter
+     - Creates MarketPairRegistry and registers all pairs
+     - Creates Ledger with initial cash balance ($1000 default)
+     - Creates StrategyRouter
+     - Instantiates MathArbStrategy with market_pairs reference
+     - Registers strategy with router
+   - Modified `handle_book_snapshot()`:
+     - After updating OrderBookState, calls `route_to_strategies()`
+   - Modified `handle_level_update()`:
+     - After updating level, calls `route_to_strategies()`
+   - Added `route_to_strategies()`:
+     - Creates StrategyContext with order_book_state, ledger snapshot, timestamp
+     - Calls `router.on_book_update()` with token_id and context
+     - Logs any OrderIntents generated (future: send to executor)
+   - Modified `handle_tick()`:
+     - Calls `router.on_tick()` for periodic strategy processing
+   - Modified `shutdown()`:
+     - Calls `router.on_shutdown()` to get exit intents
+
+3. **src/main.rs** (~95 lines, was ~75)
+   - Added import: `MarketPair`
+   - Added market pair configuration section with example BTC 15-min market
+   - Creates `Vec<MarketPair>` with sample YES/NO token pair
+   - Passes both `token_ids` and `market_pairs` to `Bot::new()`
+   - Logs number of configured market pairs
+
+### Integration Flow:
+
+```
+WebSocket Update → OrderBookState::update_level()
+                 → route_to_strategies(token_id)
+                 → StrategyRouter::on_book_update()
+                 → MathArbStrategy::on_book_update()
+                    ├─ get_complement(token_id) from MarketPairRegistry
+                    ├─ get both books from OrderBookState
+                    ├─ detect_opportunity() with EdgeCalculator
+                    └─ create_arb_intents() → Vec<OrderIntent>
+                 → Log intents (TODO: route to Executor in Phase 8)
+```
+
+### Key Design Decisions:
+
+1. **Atomic Execution:** Both legs share same `group_id` for grouped execution
+2. **Dynamic Thresholds:** EdgeCalculator replaces static constants
+3. **Market Pairs Registry:** Enables YES/NO complement lookup from any token_id
+4. **Urgency::Immediate:** Uses FOK orders to avoid partial fills
+5. **Cooldown:** Prevents rapid-fire execution on same market
+6. **Exposure Limits:** Caps position size per market
+
+### Validation:
+- ✅ cargo build succeeds (no warnings)
+- ✅ cargo test passes (115 tests total, up from 94)
+- ✅ New tests: 21 (7 market_pair + 7 edge_calculator + 7 arbitrage)
+- ✅ MathArbStrategy correctly detects arb opportunities
+- ✅ Strategy properly integrated into Bot event loop
+- ✅ Market pairs passed from main.rs to Bot to Strategy
