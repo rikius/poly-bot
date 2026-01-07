@@ -1,3 +1,14 @@
-//! Risk module - circuit breaker and risk limits
+//! Risk module - circuit breaker, risk limits, and reconciliation
 //!
-//! Implemented in Phase 5
+//! Safety systems to prevent catastrophic losses:
+//! - CircuitBreaker: Halts trading on repeated failures
+//! - RiskLimits: Enforces position and loss limits
+//! - Reconciliation: REST sync to detect state drift
+
+pub mod circuit_breaker;
+pub mod limits;
+pub mod reconciliation;
+
+pub use circuit_breaker::{CircuitBreaker, CircuitBreakerStats, CircuitState, OpenReason};
+pub use limits::{LimitViolation, RiskLimits, RiskLimitsConfig, RiskLimitsStats};
+pub use reconciliation::{ReconciliationLoop, ReconciliationMessage, ReconciliationResult};

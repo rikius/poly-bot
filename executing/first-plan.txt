@@ -341,28 +341,41 @@ src/
 
 ---
 
-### Phase 5: Risk & Circuit Breaker
+### Phase 5: Risk & Circuit Breaker ✅
 
 **Goal:** Safety systems that prevent catastrophic losses.
 
-#### Step 5.1: Implement Risk Module
+#### Step 5.1: Implement Risk Module ✅
 
-1. **`src/risk/circuit_breaker.rs`** - Circuit breaker
-   - ErrorType classification (Retryable/Fatal/Expected)
-   - States: Closed → Open → HalfOpen
-   - Open on: WS disconnect, reconciliation failure, >20% reject rate
+1. ✅ **`src/risk/circuit_breaker.rs`** - Circuit breaker
+   - CircuitState enum: Closed → Open → HalfOpen
+   - OpenReason: FatalErrorThreshold, RejectRateExceeded, WebSocketDisconnect, etc.
+   - Open on: WS disconnect, reconciliation failure, >20% reject rate, 5+ fatal errors
    - Only Fatal errors count toward threshold
+   - Auto-recovery after 60s timeout → HalfOpen
+   - Closes after 3 successful orders in HalfOpen
+   - 9 unit tests
 
-2. **`src/risk/limits.rs`** - Hard risk limits
-   - MAX_DAILY_LOSS_USD
-   - MAX_OPEN_ORDERS
-   - MAX_UNHEDGED_EXPOSURE
-   - MAX_POSITION_PER_MARKET
+2. ✅ **`src/risk/limits.rs`** - Hard risk limits
+   - RiskLimitsConfig: max_daily_loss, max_open_orders, max_position_exposure, etc.
+   - check_order() pre-trade validation
+   - record_realized_pnl() tracks daily P&L
+   - Halts trading when limits exceeded
+   - 6 unit tests
 
-#### Step 5.2: Validation Checkpoint
-- [ ] Circuit breaker opens on simulated errors
-- [ ] Circuit breaker auto-recovers (half-open)
-- [ ] Risk limits enforce correctly
+3. ✅ **`src/risk/reconciliation.rs`** - REST sync loop
+   - ReconciliationLoop runs every 2 minutes
+   - Compares server orders with local OpenOrders
+   - Detects discrepancies: RemoteNotLocal, LocalNotRemote, StateMismatch
+   - Triggers circuit breaker on critical issues
+   - 2 unit tests
+
+#### Step 5.2: Validation Checkpoint ✅ ALL PASSED
+- ✅ Circuit breaker opens on simulated errors
+- ✅ Circuit breaker auto-recovers (half-open)
+- ✅ Risk limits enforce correctly
+- ✅ All 73 tests passing
+- ✅ cargo build with no warnings
 
 ---
 

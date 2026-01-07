@@ -83,6 +83,12 @@ impl OrderState {
             OrderState::Acked | OrderState::PartiallyFilled | OrderState::CancelPending
         )
     }
+
+    /// Is this order considered "open" from exchange perspective?
+    /// Same as is_active but more explicit name for reconciliation
+    pub fn is_open(&self) -> bool {
+        self.is_active()
+    }
 }
 
 /// A tracked order with full lifecycle info
@@ -299,6 +305,12 @@ impl OpenOrders {
             .filter(|r| r.state.is_active())
             .map(|r| r.clone())
             .collect()
+    }
+
+    /// Alias for active_orders - returns all open orders
+    /// Used by reconciliation to compare with server state
+    pub fn all_open(&self) -> Vec<TrackedOrder> {
+        self.active_orders()
     }
 
     /// Get all orders for a specific token

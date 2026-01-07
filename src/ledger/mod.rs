@@ -128,6 +128,21 @@ impl Ledger {
         let order_notional = self.orders.total_reserved_notional();
         position_notional + order_notional
     }
+
+    /// Get count of open orders
+    pub fn open_orders_count(&self) -> u32 {
+        self.orders.stats().active_count as u32
+    }
+
+    /// Get cash balance snapshot
+    pub fn cash_snapshot(&self) -> CashSnapshot {
+        self.cash.snapshot()
+    }
+
+    /// Get position for a token (returns default if none)
+    pub fn get_position(&self, token_id: &TokenId) -> Position {
+        self.positions.get(token_id)
+    }
 }
 
 /// Complete ledger snapshot for logging/persistence
