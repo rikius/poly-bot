@@ -165,17 +165,17 @@ pub struct OrderRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrderResponse {
-    #[serde(default)]
+    #[serde(default, alias = "errorMsg")]
     pub error_msg: String,
-    #[serde(default)]
+    #[serde(default, alias = "orderID")]
     pub order_id: OrderId,
-    #[serde(default)]
+    #[serde(default, alias = "takingAmount")]
     pub taking_amount: String,
-    #[serde(default)]
+    #[serde(default, alias = "makingAmount")]
     pub making_amount: String,
     #[serde(default)]
     pub status: String,
-    #[serde(default)]
+    #[serde(default, alias = "transactionsHashes")]
     pub transactions_hashes: Vec<TxHash>,
     pub success: bool,
 }
