@@ -1,8 +1,8 @@
 # Polymarket Bot - Complete Execution Plan
 
-## Current Status: Phase 7.5 Complete ✅
+## Current Status: Phase 8.5 Complete ✅
 
-**Latest Update:** 2026-01-07
+**Latest Update:** 2026-01-08
 
 ### Progress Summary
 - ✅ **Phase 0:** Wallet Setup - Funded trading wallet with API credentials
@@ -15,7 +15,8 @@
 - ✅ **Event-Driven Refactor:** tokio::select! architecture, <1ms latency
 - ✅ **Phase 7:** Math arb strategy (MVP) - Market pair registry, edge calculator, MathArbStrategy (115 tests)
 - ✅ **Phase 7.5:** API Fix & Market Discovery - Fixed CLOB/Gamma API, slug-based 15-min crypto discovery (136 tests)
-- 🚧 **Phase 8:** Wire up execution policies (taker/maker) - IN PROGRESS
+- ✅ **Phase 8:** Wire Execution Policies - Full execution pipeline connected (136 tests)
+- ✅ **Phase 8.5:** Maker Strategy Enhancement - Zero-fee maker execution (150 tests)
 - ⏸️ **Phase 9:** Integration and live testing
 - ⏸️ **Phase 10:** Monitoring and deployment
 
@@ -26,7 +27,7 @@
 - Ledger system: orders, positions, cash tracking
 - Order state machine with lifecycle management
 - Bot module with event-driven tokio::select! architecture
-- Clean separation: main.rs (86 lines), bot.rs (~400 lines)
+- Clean separation: main.rs (86 lines), bot.rs (~730 lines)
 - Kill switch with async Notify + file watcher
 - HTTP client with connection pooling and optimized settings
 - HMAC authentication for REST API
@@ -37,11 +38,20 @@
 - Market pair registry for YES/NO (Up/Down) token tracking
 - Dynamic edge calculator with fee/liquidity awareness
 - MathArbStrategy with arb detection and intent generation
-- **NEW (Phase 7.5):** Gamma API client for market discovery
-- **NEW (Phase 7.5):** Slug-based discovery for 15-min crypto markets (BTC, ETH, SOL)
-- **NEW (Phase 7.5):** MarketPair supports Up/Down outcomes (not just Yes/No)
-- **NEW (Phase 7.5):** Bot auto-discovers live markets on startup
-- All tests passing (136 unit tests)
+- Gamma API client for market discovery
+- Slug-based discovery for 15-min crypto markets (BTC, ETH, SOL)
+- MarketPair supports Up/Down outcomes (not just Yes/No)
+- Bot auto-discovers live markets on startup
+- **Phase 8:** Full execution pipeline wired: Strategy → Policy → Executor → API
+- **Phase 8:** Paper mode (safe testing) vs Live mode (real trading)
+- **Phase 8:** Circuit breaker integration in execution path
+- **Phase 8:** Execution result tracking and logging
+- **NEW (Phase 8.5):** DualPolicy for Taker/Maker routing based on urgency
+- **NEW (Phase 8.5):** OrderTracker for outstanding GTC order management
+- **NEW (Phase 8.5):** CancellationManager for order cleanup
+- **NEW (Phase 8.5):** User WebSocket wired for fill notifications
+- **NEW (Phase 8.5):** Maker mode config (USE_MAKER_MODE=true for 1% edge, 0% fees)
+- All tests passing (150 unit tests)
 
 ---
 
@@ -744,8 +754,295 @@ Since you're new to Rust, here's how I'll guide you:
 | 5 | 1-2 hrs | Safety systems active |
 | 6 | 2-3 hrs | Strategy framework ready |
 | 7 | 2-3 hrs | **First strategy running (paper)** |
-| 8 | 1-2 hrs | Maker strategy added |
+| 8 | 1-2 hrs | Execution pipeline wired |
+| 8.5 | 2-3 hrs | **Maker strategy (zero fees!)** |
 | 9 | 1 week | Live testing with small amounts |
 | 10 | 1-2 hrs | Production deployment |
+
+---
+
+## Phase 8.5: Maker Strategy Enhancement 🚧 NEW
+
+**Goal:** Take advantage of Polymarket's 0% maker fee on 15-min crypto markets.
+
+### Why Maker Strategy Matters
+
+**Fee Structure on 15-min Crypto Markets:**
+| Role | Fee | Edge Needed |
+|------|-----|-------------|
+| Taker | Up to 3% | 3%+ to profit |
+| Maker | 0% (FREE!) | 1%+ to profit |
+
+**Example: YES @ $0.52 ask, NO @ $0.47 ask**
+- Combined = $0.99, Edge = $0.01 (1%)
+- **Taker:** 1% - 3% fee = **-2% LOSS** ❌
+- **Maker:** 1% - 0% fee = **+1% PROFIT** ✅
+
+### What Already Exists (Ready to Wire)
+
+```rust
+// src/execution/policy.rs
+MakerPolicy::new()           // ✅ GTC orders, post on book
+  .with_price_offset(cents)  // ✅ Post inside spread
+
+// src/strategy/edge_calculator.rs  
+EdgeConfig::maker()          // ✅ min_edge = 1% (vs 3% taker)
+
+// src/strategy/arbitrage.rs
+MathArbConfig::maker()       // ✅ use_maker_execution = true
+
+// src/constants.rs
+MAKER_MIN_EDGE = 0.01        // ✅ 1 cent minimum edge
+```
+
+### Implementation Tasks
+
+#### Task 8.5.1: Dual Policy Support in Bot ⬜
+**File:** `src/bot.rs`
+
+```rust
+// Change from:
+let policy = Arc::new(TakerPolicy::new());
+
+// To:
+let taker_policy = Arc::new(TakerPolicy::new());
+let maker_policy = Arc::new(MakerPolicy::new().with_price_offset(dec!(0.5))); // 0.5 cents inside spread
+
+// Keep both, choose based on OrderIntent.urgency
+```
+
+**Logic:**
+- `Urgency::Immediate` → Use TakerPolicy (FOK)
+- `Urgency::Passive` → Use MakerPolicy (GTC)
+
+#### Task 8.5.2: Outstanding Order Tracker ⬜
+**File:** `src/execution/order_tracker.rs` (NEW)
+
+```rust
+pub struct OrderTracker {
+    /// Active orders by order_id
+    active_orders: DashMap<OrderId, TrackedOrder>,
+    
+    /// Orders by token (for quick lookup)
+    by_token: DashMap<TokenId, HashSet<OrderId>>,
+    
+    /// Orders by market (for cancellation on close)
+    by_market: DashMap<ConditionId, HashSet<OrderId>>,
+}
+
+pub struct TrackedOrder {
+    pub order_id: OrderId,
+    pub token_id: TokenId,
+    pub market_id: ConditionId,
+    pub side: Side,
+    pub price: Decimal,
+    pub size: Decimal,
+    pub filled: Decimal,
+    pub created_at: Instant,
+    pub strategy_name: String,
+}
+
+impl OrderTracker {
+    /// Check if we already have an order at this price
+    pub fn has_order_at(&self, token: &TokenId, price: Decimal) -> bool;
+    
+    /// Track a new order
+    pub fn track(&self, order: TrackedOrder);
+    
+    /// Update on fill
+    pub fn on_fill(&self, order_id: &OrderId, filled_size: Decimal);
+    
+    /// Remove completed/cancelled order
+    pub fn remove(&self, order_id: &OrderId);
+    
+    /// Get all orders for a market (for cancellation)
+    pub fn orders_for_market(&self, market: &ConditionId) -> Vec<OrderId>;
+    
+    /// Get stale orders (older than threshold)
+    pub fn stale_orders(&self, max_age: Duration) -> Vec<OrderId>;
+}
+```
+
+#### Task 8.5.3: Wire User WebSocket to Ledger ⬜
+**File:** `src/bot.rs`
+
+Currently User WebSocket exists but isn't wired. Need to:
+1. Parse fill notifications from User WS
+2. Update `Ledger` positions on fills
+3. Update `OrderTracker` with fill progress
+
+```rust
+// In Bot::run() event loop:
+user_msg = self.user_ws_rx.recv() => {
+    if let Some(msg) = user_msg {
+        self.handle_user_message(msg).await;
+    }
+}
+
+// Handle fill notification
+fn handle_fill(&mut self, fill: FillNotification) {
+    // Update ledger
+    self.ledger.record_fill(fill.order_id, fill.size, fill.price);
+    
+    // Update tracker
+    self.order_tracker.on_fill(&fill.order_id, fill.size);
+    
+    // Log
+    info!("💰 Fill: {} {} @ ${}", fill.size, fill.side, fill.price);
+}
+```
+
+#### Task 8.5.4: Order Cancellation Logic ⬜
+**File:** `src/execution/cancellation.rs` (NEW)
+
+```rust
+pub struct CancellationManager {
+    api_client: Arc<ApiClient>,
+    order_tracker: Arc<OrderTracker>,
+}
+
+impl CancellationManager {
+    /// Cancel order by ID
+    pub async fn cancel(&self, order_id: &OrderId) -> Result<()>;
+    
+    /// Cancel all orders for a market (before close)
+    pub async fn cancel_market(&self, market: &ConditionId) -> Result<usize>;
+    
+    /// Cancel stale orders (cleanup)
+    pub async fn cancel_stale(&self, max_age: Duration) -> Result<usize>;
+    
+    /// Cancel all outstanding orders (emergency)
+    pub async fn cancel_all(&self) -> Result<usize>;
+}
+```
+
+#### Task 8.5.5: MakerArbStrategy ⬜
+**File:** `src/strategy/maker_arb.rs` (NEW)
+
+```rust
+/// Maker arbitrage strategy - same logic as MathArb but with GTC orders
+pub struct MakerArbStrategy {
+    name: String,
+    config: MakerArbConfig,
+    registry: Arc<MarketPairRegistry>,
+    edge_calculator: EdgeCalculator,  // Uses EdgeConfig::maker()
+    order_tracker: Arc<OrderTracker>, // Check existing orders
+    enabled: AtomicBool,
+}
+
+pub struct MakerArbConfig {
+    pub min_edge: Decimal,           // Default: 1% (vs 3% taker)
+    pub price_offset_cents: Decimal, // Post inside spread
+    pub max_orders_per_market: u32,  // Avoid over-posting
+    pub order_ttl_secs: u64,         // Cancel after N seconds
+    pub max_position_size: Decimal,
+}
+
+impl Strategy for MakerArbStrategy {
+    fn on_book_update(&self, market: &str, token: &str, ctx: &StrategyContext) -> Vec<OrderIntent> {
+        // 1. Check arb opportunity (same as MathArb)
+        // 2. Check if we already have orders at this level
+        // 3. Return Urgency::Passive intents (→ GTC orders)
+    }
+}
+```
+
+#### Task 8.5.6: Add Config Options ⬜
+**File:** `src/config.rs`
+
+```rust
+pub struct Config {
+    // ... existing fields ...
+    
+    /// Use maker execution (GTC orders, 0% fee)
+    pub use_maker_mode: bool,
+    
+    /// Price offset for maker orders (cents inside spread)
+    pub maker_price_offset: Decimal,
+    
+    /// Max age for GTC orders before cancellation (seconds)
+    pub maker_order_ttl: u64,
+}
+```
+
+**Environment variables:**
+```bash
+USE_MAKER_MODE=true
+MAKER_PRICE_OFFSET=0.5
+MAKER_ORDER_TTL=120
+```
+
+### Execution Flow (Maker Mode)
+
+```
+Book Update → MakerArbStrategy.on_book_update()
+           → Check edge >= 1% (maker threshold)
+           → Check no existing order at this price
+           → Return Vec<OrderIntent> with Urgency::Passive
+           
+process_intents() → Urgency::Passive detected
+                 → Use MakerPolicy (not TakerPolicy)
+                 → MakerPolicy.to_order_params()
+                     → OrderType::GTC
+                     → Apply price_offset (post inside spread)
+                 → executor.execute()
+                 → order_tracker.track(order)
+                 
+User WS Fill → handle_fill()
+            → ledger.record_fill()
+            → order_tracker.on_fill()
+            → Check if arb pair is balanced
+            
+Cleanup Timer → cancellation.cancel_stale()
+             → Remove old unfilled orders
+```
+
+### Validation Checkpoints
+
+```bash
+# Build and test
+cargo build
+cargo test
+
+# Run in paper mode with maker config
+USE_MAKER_MODE=true BOT_MODE=paper cargo run
+
+# Should see:
+# "Using MakerPolicy for Urgency::Passive intents"
+# "📝 Intent: MakerArbStrategy BUY ... [Passive/GTC]"
+# "🎯 Order posted: ... GTC @ $0.525"
+```
+
+### Test Cases
+
+1. **Maker order creation:**
+   - Urgency::Passive → OrderType::GTC
+   - Price adjusted by offset
+
+2. **Order tracking:**
+   - New orders tracked in OrderTracker
+   - Duplicate orders prevented
+
+3. **Fill handling:**
+   - User WS fill updates ledger
+   - Tracker updated with fill progress
+
+4. **Cancellation:**
+   - Stale orders cancelled after TTL
+   - Market orders cancelled on close
+
+### Risk Considerations
+
+1. **Unfilled orders at resolution:**
+   - Cancel all orders 1-2 minutes before market close
+   - Need market end time from Gamma API
+
+2. **Imbalanced legs:**
+   - If one leg fills but other doesn't
+   - Need to either: cancel other leg OR take opposing position
+
+3. **Quote stale risk:**
+   - GTC orders can be stale if price moves
+   - Cancel and re-quote periodically
 
 ---
