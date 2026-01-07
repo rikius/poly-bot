@@ -247,17 +247,54 @@ What Was Built
   Ctrl+C
 
   ---
-  Next Steps: Phase 5 - Risk Management
+  Next Steps: Phase 6 - Strategy Framework
 
   What needs to be built:
-  1. src/risk/circuit_breaker.rs - Trading halt on repeated errors
-    - Track error counts by type
-    - Configurable thresholds
-  2. src/risk/limits.rs - Risk limits
-    - Max position size, max daily loss, etc.
-  3. src/ledger/reconciliation.rs - REST sync loop
-    - Every 2-5 minutes: GET /orders?status=open
-    - Handle discrepancies
+  1. src/strategy/traits.rs - Strategy trait and OrderIntent
+  2. src/strategy/router.rs - StrategyRouter for multiple strategies
+  3. src/execution/policy.rs - ExecutionPolicy trait (Taker/Maker)
+  4. src/execution/executor.rs - Order executor
+
+  ---
+  Phase 5: Risk Management ✅
+
+  Files Created:
+  1. src/risk/circuit_breaker.rs - Circuit breaker pattern
+    - CircuitState enum: Closed (normal) → Open (halted) → HalfOpen (testing)
+    - OpenReason enum: FatalErrorThreshold, RejectRateExceeded, WebSocketDisconnect, ReconciliationFailure, ManualTrigger, DailyLossExceeded
+    - Only ErrorType::Fatal errors count toward threshold
+    - Auto-recovery after timeout (60s) → HalfOpen
+    - Closes after 3 successful orders in HalfOpen
+    - record_order_submitted(), record_order_result(), record_ws_disconnect()
+    - is_trading_allowed() check before every order
+    - 9 unit tests (all passing)
+  2. src/risk/limits.rs - Hard risk limits
+    - RiskLimitsConfig: max_daily_loss, max_open_orders, max_position_exposure, max_unhedged_exposure, max_order_size, min_order_size
+    - LimitViolation enum for all violation types
+    - check_order() pre-trade validation
+    - record_realized_pnl() tracks daily P&L
+    - Halts trading when daily loss exceeded
+    - 6 unit tests (all passing)
+  3. src/risk/reconciliation.rs - REST sync loop
+    - ReconciliationLoop runs every 2 minutes
+    - Fetches GET /orders from server
+    - Compares with local OpenOrders
+    - Detects discrepancies: RemoteNotLocal, LocalNotRemote, StateMismatch
+    - Triggers circuit breaker on critical discrepancies
+    - is_critical() determines if trading should halt
+    - 2 unit tests (all passing)
+
+  Updated Files:
+  1. src/risk/mod.rs - Module exports for circuit_breaker, limits, reconciliation
+  2. src/ledger/mod.rs - Added open_orders_count(), cash_snapshot(), get_position() methods
+  3. src/ledger/orders.rs - Added is_open() method and all_open() alias
+
+  Validation:
+  - ✅ cargo build succeeds (no warnings)
+  - ✅ cargo test passes (73 tests total, up from 56)
+  - ✅ Circuit breaker opens on fatal errors, WS disconnect, reject rate
+  - ✅ Risk limits validate orders before submission
+  - ✅ Reconciliation detects discrepancies between local and server state
 
   ---
   Phase 4: Ledger & State Machine ✅

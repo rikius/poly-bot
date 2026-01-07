@@ -4,7 +4,7 @@
 
 ---
 
-## 🚀 Current Status: Phase 4 Complete (Updated: 2026-01-06)
+## 🚀 Current Status: Phase 5 Complete (Updated: 2026-01-06)
 
 ### ✅ Completed Phases
 
@@ -13,18 +13,20 @@
 - **Phase 2:** WebSocket + State - Live market data streaming working
 - **Phase 3:** HTTP Client & Authentication - REST API + EIP-712 signing (25 tests ✅)
 - **Phase 4:** Ledger & State Machine - Authoritative portfolio state tracking (56 tests ✅)
+- **Phase 5:** Risk & Circuit Breaker - Safety systems complete (73 tests ✅)
 
 ### 🚧 In Progress
 
-- **Phase 5:** Risk & Circuit Breaker - NEXT
+- **Phase 6:** Strategy Framework - NEXT
 
 ### 📊 Metrics
 
-- **Tests Passing:** 56/56 unit tests
+- **Tests Passing:** 73/73 unit tests
 - **Build Time:** ~2s
 - **WebSocket:** Market data + User fills streaming
 - **Order Book:** Tracking markets with lock-free DashMap
 - **Ledger:** Orders, Positions, Cash tracking with DashMap
+- **Risk:** Circuit breaker, limits, reconciliation
 - **Code Quality:** Clean module separation
 
 ---
@@ -133,14 +135,14 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [x] **Positions:** token_id → shares, avg cost, realized P&L
 - [x] **Cash:** available, reserved, total USDC
 
-### 2.5 Reconciliation Loop ⏸️ DEFERRED TO PHASE 5
+### 2.5 Reconciliation Loop ✅ IMPLEMENTED IN PHASE 5
 
-- [ ] Every 2-5 minutes: GET /orders?status=open
-- [ ] Cross-check with local OpenOrders
-- [ ] Handle discrepancies
-- Note: Deferred to Phase 5 (Risk) as it ties into circuit breaker logic
+- [x] Every 2-5 minutes: GET /orders?status=open
+- [x] Cross-check with local OpenOrders
+- [x] Handle discrepancies
+- Note: Implemented in src/risk/reconciliation.rs
 
-### 2.6 Market Registry ⏸️ DEFERRED TO PHASE 5
+### 2.6 Market Registry ⏸️ DEFERRED TO PHASE 6
 
 - [ ] Fetch markets list from REST API
 - [ ] Build mapping: condition_id → {yes_token_id, no_token_id}
@@ -195,21 +197,21 @@ The phases below are ordered to build a **truthful, safe system first**, then ad
 - [ ] Transition: Acked → CancelPending → Cancelled
 - [ ] Cancel-all helper for shutdown
 
-### 3.6 Circuit Breaker
+### 3.6 Circuit Breaker ✅ IMPLEMENTED IN PHASE 5
 
-- [ ] Track reject count and rate
-- [ ] States: Closed (normal) → Open (paused) → HalfOpen (testing)
-- [ ] Implement `ErrorType` classification (see 02-RUST-ARCHITECTURE.md):
-  - [ ] `Retryable`: ORDER_DELAYED, MARKET_NOT_READY (don't count toward threshold)
-  - [ ] `Expected`: FOK_ORDER_NOT_FILLED_ERROR (don't count toward threshold)
-  - [ ] `Fatal`: All INVALID*ORDER*\*, EXECUTION_ERROR, auth errors (count toward threshold)
-- [ ] Open circuit on:
-  - [ ] WebSocket disconnected
-  - [ ] Reconciliation failure
-  - [ ] Reject rate > 20% (only Fatal errors count)
-- [ ] Auto-reset after timeout (try half-open)
-- [ ] **Check circuit.is_trading_allowed() before every order**
-- [ ] **Check market.accepting_orders before submitting orders**
+- [x] Track reject count and rate
+- [x] States: Closed (normal) → Open (paused) → HalfOpen (testing)
+- [x] Implement `ErrorType` classification (see 02-RUST-ARCHITECTURE.md):
+  - [x] `Retryable`: ORDER_DELAYED, MARKET_NOT_READY (don't count toward threshold)
+  - [x] `Expected`: FOK_ORDER_NOT_FILLED_ERROR (don't count toward threshold)
+  - [x] `Fatal`: All INVALID*ORDER*\*, EXECUTION_ERROR, auth errors (count toward threshold)
+- [x] Open circuit on:
+  - [x] WebSocket disconnected
+  - [x] Reconciliation failure
+  - [x] Reject rate > 20% (only Fatal errors count)
+- [x] Auto-reset after timeout (try half-open)
+- [x] **Check circuit.is_trading_allowed() before every order**
+- [ ] **Check market.accepting_orders before submitting orders** (Phase 6)
 
 ### 3.7 Strategy Trait + OrderIntent (NEW - Pivot Architecture)
 
