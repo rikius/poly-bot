@@ -4,7 +4,7 @@ A high-frequency, event-driven trading bot for [Polymarket](https://polymarket.c
 
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-136%20passing-green.svg)](src/)
+[![Tests](https://img.shields.io/badge/tests-150%20passing-green.svg)](src/)
 
 ## 🎯 Overview
 
@@ -462,11 +462,11 @@ Market Data → Strategy Decision → Order Execution
 
 ## 📜 Testing Status
 
-**Current Test Suite**: 136/136 passing ✅
+**Current Test Suite**: 150/150 passing ✅
 
 ### Test Coverage
 
-- **Unit Tests**: 136 tests across all modules
+- **Unit Tests**: 150 tests across all modules
 - **Integration**: Event loop, WebSocket, API clients
 - **Ledger**: Order tracking, position accounting, PnL
 - **Risk**: Circuit breaker triggers, limit validation
