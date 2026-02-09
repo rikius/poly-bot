@@ -524,6 +524,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-**Built with ❤️ and Rust by [@x0ponti](https://github.com/pontiggia)**
+**Built with ❤️ and Rust by [@pontiggia](https://github.com/pontiggia)**
 
 For questions, issues, or contributions, please open an issue on GitHub.
