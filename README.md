@@ -2,10 +2,6 @@
 
 A high-frequency, event-driven trading bot for [Polymarket](https://polymarket.com) prediction markets, written in Rust for maximum performance and safety.
 
-[![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-150%20passing-green.svg)](src/)
-
 ## 🎯 Overview
 
 This bot automatically discovers and trades on Polymarket's 15-minute cryptocurrency prediction markets (BTC, ETH, SOL Up/Down). It features:
