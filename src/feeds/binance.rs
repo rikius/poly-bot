@@ -65,10 +65,16 @@ impl BinanceFeed {
         Arc::new(Self { prices })
     }
 
-    /// Run the feed forever (reconnecting on error).
+    /// Run the feed forever, reconnecting with exponential backoff on failure.
+    ///
+    /// Back-off schedule: 5 s, 10 s, 20 s, 40 s, 60 s (cap), 60 s, …
+    /// A successful connection (stream stayed up > 0 messages) resets the delay
+    /// to the initial value.
     ///
     /// Spawn this with `tokio::spawn`.
     pub async fn run(&self) {
+        const MAX_DELAY_SECS: u64 = 60;
+
         let streams: String = TRACKED_SYMBOLS
             .iter()
             .map(|(ticker, _)| format!("{}@aggTrade", ticker.to_lowercase()))
@@ -78,16 +84,23 @@ impl BinanceFeed {
 
         info!("Binance feed connecting: {}", url);
 
+        let mut delay_secs = RECONNECT_DELAY_SECS;
+
         loop {
             match self.connect_and_stream(&url).await {
                 Ok(()) => {
-                    warn!("Binance WS stream ended cleanly — reconnecting in {}s", RECONNECT_DELAY_SECS);
+                    // Clean disconnect — stream was alive and then closed
+                    warn!("Binance WS stream ended cleanly — reconnecting in {}s", delay_secs);
+                    // Reset backoff: clean disconnects are transient
+                    delay_secs = RECONNECT_DELAY_SECS;
                 }
                 Err(e) => {
-                    warn!("Binance WS error: {} — reconnecting in {}s", e, RECONNECT_DELAY_SECS);
+                    warn!("Binance WS error: {} — reconnecting in {}s", e, delay_secs);
+                    // Increase delay for next attempt (exponential, capped)
+                    delay_secs = (delay_secs * 2).min(MAX_DELAY_SECS);
                 }
             }
-            tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
+            tokio::time::sleep(Duration::from_secs(delay_secs)).await;
         }
     }
 

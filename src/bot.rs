@@ -221,6 +221,9 @@ impl Bot {
         // Shared latency histograms (threaded into executor as well)
         let latency = BotLatency::new();
 
+        // Build alert sender early so it can be shared with the executor
+        let alerts = config.alert_sender();
+
         // Authenticate and set up executor + user WS only if credentials are available
         let (executor, user_ws_rx, user_ws_task) = if config.has_credentials() {
             // Set up SDK signer + authenticated CLOB client
@@ -264,6 +267,7 @@ impl Bot {
                 policy,
                 circuit_breaker.clone(),
                 Arc::clone(&latency),
+                alerts.clone(),
             ));
 
             // Set up User WebSocket for fill notifications
@@ -305,9 +309,6 @@ impl Bot {
             market_registry.len(),
             strategy_router.strategy_names().len()
         );
-
-        // Build alert sender before moving config into the struct
-        let alerts = config.alert_sender();
 
         Self {
             config,

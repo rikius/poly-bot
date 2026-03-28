@@ -172,13 +172,23 @@ async fn main() -> anyhow::Result<()> {
         
         (pairs, tokens)
     } else {
-        // Fallback to hardcoded market for testing when API fails
-        warn!("No markets discovered - using hardcoded fallback");
-        
+        // Fallback to hardcoded market for testing when API fails.
+        // REFUSE to use stale token IDs in live mode — they may be expired
+        // and any order placed would be against the wrong (or non-existent) market.
+        if config.mode == polymarket_bot::config::OperatingMode::Live {
+            error!("Market discovery failed and BOT_MODE=live — refusing to start with hardcoded fallback");
+            error!("Fix the API connectivity issue or switch to paper mode.");
+            return Err(anyhow::anyhow!(
+                "No markets discovered in live mode — refusing to use hardcoded fallback"
+            ));
+        }
+
+        warn!("No markets discovered - using hardcoded fallback (paper mode only)");
+
         let yes_token = "91146426612524606788185897426983484145854573836093539884347307480474597236733".to_string();
         let no_token = "42146376778762047477642266233020835044794863565048464944940190870964136665187".to_string();
         let market_id = "0x_fallback_test".to_string();
-        
+
         let pairs = vec![
             MarketPair::new_up_down(
                 market_id,
@@ -187,9 +197,9 @@ async fn main() -> anyhow::Result<()> {
             )
             .with_description("FALLBACK TEST MARKET"),
         ];
-        
+
         let tokens = vec![yes_token, no_token];
-        
+
         (pairs, tokens)
     };
 
@@ -206,7 +216,12 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse::<u16>().ok())
             .unwrap_or(3001);
-        tokio::spawn(run_api_server(api_state, api_port));
+        tokio::spawn(async move {
+            if let Err(e) = run_api_server(api_state, api_port).await {
+                error!("API server fatal: {}", e);
+                std::process::exit(1);
+            }
+        });
     }
 
     bot.run().await;

@@ -191,9 +191,13 @@ impl Config {
                 Some(AlertSender::new(AlertBackend::Discord { url }))
             }
             Some("telegram") => {
-                let token = self.telegram_bot_token.clone()?;
+                let token = self.telegram_bot_token.as_ref()?;
                 let chat_id = self.telegram_chat_id.clone()?;
-                Some(AlertSender::new(AlertBackend::Telegram { token, chat_id }))
+                let endpoint = format!(
+                    "https://api.telegram.org/bot{}/sendMessage",
+                    token
+                );
+                Some(AlertSender::new(AlertBackend::Telegram { endpoint, chat_id }))
             }
             _ => None,
         }

@@ -88,13 +88,14 @@ impl ExternalPriceRecord {
         self.price = new_price;
         self.updated_at = now;
 
-        // Recompute change_bps
+        // Recompute change_bps without going through f64 (avoids precision loss).
+        // Truncate toward zero so fractional bps are dropped, not rounded.
         if self.window_open > Decimal::ZERO {
             let change = (new_price - self.window_open) / self.window_open;
             self.change_bps = (change * Decimal::from(10_000))
+                .trunc()
                 .to_string()
-                .parse::<f64>()
-                .map(|f| f as i64)
+                .parse::<i64>()
                 .unwrap_or(0);
         }
     }

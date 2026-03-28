@@ -88,8 +88,16 @@ impl Ledger {
         // 5. Deduct fees
         self.cash.deduct_fee(fill.fee);
 
-        // 6. Store fill for history
-        self.fills.write().unwrap().push(fill);
+        // 6. Store fill for history (cap at 10 000 entries to bound memory use;
+        //    drain the oldest half when the limit is reached).
+        {
+            const MAX_FILLS: usize = 10_000;
+            let mut fills = self.fills.write().unwrap();
+            fills.push(fill);
+            if fills.len() > MAX_FILLS {
+                fills.drain(0..MAX_FILLS / 2);
+            }
+        }
     }
 
     /// Get all fills

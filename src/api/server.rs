@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::interval;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::{Config, OperatingMode};
 use crate::ledger::{orders::OrderState, positions::Fill, Ledger};
@@ -378,7 +378,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<ApiState>) {
 // Server entry point
 // ---------------------------------------------------------------------------
 
-pub async fn run_api_server(state: Arc<ApiState>, port: u16) {
+pub async fn run_api_server(state: Arc<ApiState>, port: u16) -> anyhow::Result<()> {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -410,15 +410,17 @@ pub async fn run_api_server(state: Arc<ApiState>, port: u16) {
     info!("  WebSocket:  ws://0.0.0.0:{}/ws", port);
     info!("  Metrics:    http://0.0.0.0:{}/metrics", port);
 
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            warn!("Failed to bind API server on port {}: {}", port, e);
-            return;
-        }
-    };
+    let listener = tokio::net::TcpListener::bind(addr).await
+        .map_err(|e| {
+            error!("Failed to bind API server on port {}: {}", port, e);
+            e
+        })?;
 
-    if let Err(e) = axum::serve(listener, app).await {
-        warn!("API server error: {}", e);
-    }
+    axum::serve(listener, app).await
+        .map_err(|e| {
+            error!("API server error: {}", e);
+            e
+        })?;
+
+    Ok(())
 }

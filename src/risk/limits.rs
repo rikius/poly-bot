@@ -166,15 +166,20 @@ impl RiskLimits {
         *self.daily_realized_pnl.write().unwrap() = Decimal::ZERO;
     }
 
-    /// Update daily P&L from a fill
-    pub fn record_realized_pnl(&self, pnl: Decimal) {
-        let mut daily_pnl = self.daily_realized_pnl.write().unwrap();
-        *daily_pnl += pnl;
+    /// Update daily P&L from a fill and re-check the limit.
+    ///
+    /// Pass `current_unrealized` (from the ledger's position tracker) so the
+    /// check includes mark-to-market losses on open positions.
+    pub fn record_realized_pnl(&self, pnl: Decimal, current_unrealized: Decimal) {
+        let mut daily_realized = self.daily_realized_pnl.write().unwrap();
+        *daily_realized += pnl;
 
-        // Check if we've exceeded daily loss limit
-        if *daily_pnl < -self.config.max_daily_loss {
+        // Check realized + unrealized combined so that a deeply underwater
+        // open position halts trading before it is actually closed.
+        let total = *daily_realized + current_unrealized;
+        if total < -self.config.max_daily_loss {
             self.halt_trading(LimitViolation::DailyLossExceeded {
-                current_loss: -*daily_pnl,
+                current_loss: -total,
                 limit: self.config.max_daily_loss,
             });
         }
@@ -240,10 +245,18 @@ impl RiskLimits {
         let current_position = ledger.get_position(token_id);
         let current_exposure = current_position.shares.abs() * current_position.avg_cost;
         let new_exposure = if side == Side::Buy {
+            // Buying always increases or opens a long position → exposure grows.
             current_exposure + order_value
         } else {
-            // Selling reduces exposure
-            (current_exposure - order_value).max(Decimal::ZERO)
+            // Selling: closing a long reduces exposure; opening/extending a short
+            // increases it.  Use the actual share count to determine direction.
+            if current_position.is_long() {
+                // Closing long: exposure decreases (floor at zero)
+                (current_exposure - order_value).max(Decimal::ZERO)
+            } else {
+                // Flat or already short: selling opens/extends a short position
+                current_exposure + order_value
+            }
         };
 
         if new_exposure > self.config.max_position_exposure {
@@ -261,8 +274,11 @@ impl RiskLimits {
     pub fn check_all(&self, ledger: &Ledger, registry: Option<&MarketPairRegistry>) -> Vec<LimitViolation> {
         let mut violations = Vec::new();
 
-        // Check daily loss
-        let daily_pnl = *self.daily_realized_pnl.read().unwrap();
+        // Check daily loss — include unrealized P&L so that an open position
+        // that is deeply underwater triggers the halt before it is closed.
+        let daily_realized = *self.daily_realized_pnl.read().unwrap();
+        let daily_unrealized = ledger.positions.total_unrealized_pnl();
+        let daily_pnl = daily_realized + daily_unrealized;
         if daily_pnl < -self.config.max_daily_loss {
             violations.push(LimitViolation::DailyLossExceeded {
                 current_loss: -daily_pnl,
@@ -270,9 +286,10 @@ impl RiskLimits {
             });
         }
 
-        // Check open orders
+        // Check open orders — use >= to match check_order's pre-trade gate
+        // (both block at exactly max_open_orders, not one order past it).
         let open_orders = ledger.open_orders_count();
-        if open_orders > self.config.max_open_orders {
+        if open_orders >= self.config.max_open_orders {
             violations.push(LimitViolation::MaxOpenOrdersExceeded {
                 current: open_orders,
                 limit: self.config.max_open_orders,
@@ -425,11 +442,11 @@ mod tests {
         let limits = RiskLimits::with_config(config);
 
         // Record loss within limit
-        limits.record_realized_pnl(dec!(-50));
+        limits.record_realized_pnl(dec!(-50), Decimal::ZERO);
         assert!(limits.is_trading_allowed());
 
         // Record loss exceeding limit
-        limits.record_realized_pnl(dec!(-60));
+        limits.record_realized_pnl(dec!(-60), Decimal::ZERO);
         assert!(!limits.is_trading_allowed());
         assert!(matches!(
             limits.halt_reason(),
@@ -505,7 +522,7 @@ mod tests {
         let limits = RiskLimits::with_config(config);
 
         // Trigger halt
-        limits.record_realized_pnl(dec!(-150));
+        limits.record_realized_pnl(dec!(-150), Decimal::ZERO);
         assert!(!limits.is_trading_allowed());
 
         // Reset for new day
@@ -517,8 +534,8 @@ mod tests {
     #[test]
     fn test_stats() {
         let limits = RiskLimits::new();
-        limits.record_realized_pnl(dec!(100));
-        limits.record_realized_pnl(dec!(-30));
+        limits.record_realized_pnl(dec!(100), Decimal::ZERO);
+        limits.record_realized_pnl(dec!(-30), Decimal::ZERO);
 
         let stats = limits.stats();
         assert_eq!(stats.daily_pnl, dec!(70));

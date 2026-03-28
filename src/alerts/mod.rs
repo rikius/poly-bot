@@ -32,12 +32,16 @@ use tracing::{debug, warn};
 // ---------------------------------------------------------------------------
 
 /// The destination to which alert messages are dispatched.
+///
+/// All URL construction is done once at creation time so `send()` never
+/// allocates a temporary string on the hot path.
 #[derive(Debug, Clone)]
 pub enum AlertBackend {
     /// Discord incoming webhook — POST `{"content": msg}`.
     Discord { url: String },
-    /// Telegram bot — POST `sendMessage` with `chat_id` and `text`.
-    Telegram { token: String, chat_id: String },
+    /// Telegram bot — `endpoint` is the fully-formed `sendMessage` URL
+    /// and `chat_id` is stored separately for the JSON body.
+    Telegram { endpoint: String, chat_id: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -76,13 +80,9 @@ impl AlertSender {
                     .send()
                     .await
             }
-            AlertBackend::Telegram { token, chat_id } => {
-                let url = format!(
-                    "https://api.telegram.org/bot{}/sendMessage",
-                    token
-                );
+            AlertBackend::Telegram { endpoint, chat_id } => {
                 self.client
-                    .post(&url)
+                    .post(endpoint)
                     .json(&json!({"chat_id": chat_id, "text": msg}))
                     .send()
                     .await
@@ -150,7 +150,7 @@ mod tests {
     #[test]
     fn test_telegram_backend_constructs() {
         let sender = AlertSender::new(AlertBackend::Telegram {
-            token: "123:token".to_string(),
+            endpoint: "https://api.telegram.org/bot123:token/sendMessage".to_string(),
             chat_id: "-100123456".to_string(),
         });
         assert!(matches!(sender.backend, AlertBackend::Telegram { .. }));
@@ -171,12 +171,13 @@ mod tests {
 
     #[test]
     fn test_telegram_fields_stored() {
+        let endpoint = "https://api.telegram.org/bot99:abc/sendMessage";
         let sender = AlertSender::new(AlertBackend::Telegram {
-            token: "99:abc".to_string(),
+            endpoint: endpoint.to_string(),
             chat_id: "-100777".to_string(),
         });
-        if let AlertBackend::Telegram { token, chat_id } = &sender.backend {
-            assert_eq!(token, "99:abc");
+        if let AlertBackend::Telegram { endpoint: ep, chat_id } = &sender.backend {
+            assert_eq!(ep, endpoint);
             assert_eq!(chat_id, "-100777");
         } else {
             panic!("expected Telegram backend");

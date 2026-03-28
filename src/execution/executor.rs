@@ -27,6 +27,7 @@ use polymarket_client_sdk::clob::types::response::PostOrderResponse;
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
 
+use crate::alerts::AlertSender;
 use crate::constants::PARTIAL_FILL_UNWIND_MS;
 use crate::error::ErrorType;
 use crate::execution::policy::{ExecutionPolicy, IntentRef, OrderParams};
@@ -119,6 +120,9 @@ pub struct OrderExecutor {
 
     /// Shared latency histograms
     latency: Arc<BotLatency>,
+
+    /// Optional alert sender — fires on unwind failure
+    alerts: Option<Arc<AlertSender>>,
 }
 
 impl OrderExecutor {
@@ -129,6 +133,7 @@ impl OrderExecutor {
         policy: Arc<dyn ExecutionPolicy>,
         circuit_breaker: Arc<CircuitBreaker>,
         latency: Arc<BotLatency>,
+        alerts: Option<Arc<AlertSender>>,
     ) -> Self {
         Self {
             clob_client,
@@ -137,6 +142,7 @@ impl OrderExecutor {
             circuit_breaker,
             rate_limiter: RateLimiter::for_order_submission(),
             latency,
+            alerts,
         }
     }
 
@@ -336,6 +342,10 @@ impl OrderExecutor {
                     info!(token = %unwind.token_id, "Unwind fully filled");
                 }
                 Ok(r) => {
+                    let msg = format!(
+                        "Unwind partial fill on {} — residual {} (filled {})",
+                        unwind.token_id, unwind.size, r.filled_size,
+                    );
                     warn!(
                         token    = %unwind.token_id,
                         status   = ?r.status,
@@ -343,13 +353,25 @@ impl OrderExecutor {
                         filled   = %r.filled_size,
                         "Unwind did not fully fill – residual exposure remains"
                     );
+                    self.circuit_breaker.manual_open();
+                    if let Some(ref alerts) = self.alerts {
+                        alerts.send_circuit_breaker_trip(&msg).await;
+                    }
                 }
                 Err(_) => {
+                    let msg = format!(
+                        "Unwind timed out on {} — residual {} unhedged",
+                        unwind.token_id, unwind.size,
+                    );
                     warn!(
                         token  = %unwind.token_id,
                         budget = ?Duration::from_millis(PARTIAL_FILL_UNWIND_MS),
                         "Unwind timed out"
                     );
+                    self.circuit_breaker.manual_open();
+                    if let Some(ref alerts) = self.alerts {
+                        alerts.send_circuit_breaker_trip(&msg).await;
+                    }
                 }
             }
         }
@@ -411,7 +433,18 @@ impl OrderExecutor {
     /// Process order response into execution result
     fn process_response(&self, params: &OrderParams, response: PostOrderResponse) -> ExecutionResult {
         if response.success {
-            let filled_size = response.taking_amount;
+            // Clamp taking_amount to the requested size.  A value larger than
+            // requested would be an exchange or SDK bug; silently accepting it
+            // would corrupt position tracking.
+            let filled_size = response.taking_amount.min(params.size);
+            if response.taking_amount > params.size {
+                warn!(
+                    order_id = %response.order_id,
+                    taking   = %response.taking_amount,
+                    requested = %params.size,
+                    "Exchange returned taking_amount > requested; clamping to requested size"
+                );
+            }
             let filled = filled_size > Decimal::ZERO;
 
             let status = if filled_size >= params.size {
