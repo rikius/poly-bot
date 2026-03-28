@@ -560,6 +560,9 @@ impl Bot {
                 );
                 self.latency.submit_to_ack.reset();
             }
+
+            // Edge diagnostics: show why each market pair is/isn't generating intents
+            self.log_edge_diagnostics();
         }
 
         // Detect circuit breaker transition → Open and fire alert exactly once.
@@ -575,6 +578,98 @@ impl Bot {
             }
         }
         self.circuit_was_open = is_open;
+    }
+
+    /// Log per-market edge diagnostics (why no intents are generated).
+    ///
+    /// Called every 60s.  For each registered market pair we compute:
+    ///   raw_edge  = 1 - YES_ask - NO_ask
+    ///   fee_cost  = fee_rate_bps / 10_000 * (YES_ask + NO_ask)
+    ///   tradeable = raw_edge > fee_cost + min_edge (3¢ taker / 1¢ maker)
+    ///
+    /// This makes it immediately visible in the log whether the strategy is
+    /// silently passing due to unfavourable odds (the normal case for
+    /// 15-min crypto markets with 10% fees) versus a configuration issue.
+    fn log_edge_diagnostics(&self) {
+        use rust_decimal_macros::dec;
+
+        let pairs = self.market_registry.all_pairs();
+        if pairs.is_empty() {
+            return;
+        }
+
+        // The minimum edge the taker strategy requires on top of fees
+        let taker_min_edge = dec!(0.03);
+
+        let mut any_logged = false;
+        for pair in &pairs {
+            let yes_ask = match self.order_book_state.best_ask(&pair.yes_token_id) {
+                Some(v) => v,
+                None => continue,
+            };
+            let no_ask = match self.order_book_state.best_ask(&pair.no_token_id) {
+                Some(v) => v,
+                None => continue,
+            };
+
+            let combined = yes_ask + no_ask;
+            let raw_edge = Decimal::ONE - combined;
+            let fee_rate = Decimal::from(pair.fee_rate_bps) / dec!(10000);
+            let fee_cost = fee_rate * combined;
+            let required = fee_cost + taker_min_edge;
+            let tradeable = raw_edge >= required;
+
+            let label = if combined >= Decimal::ONE {
+                "combined≥1.00 (no arb)"
+            } else if !tradeable {
+                "edge < fees+min_edge"
+            } else {
+                "TRADEABLE"
+            };
+
+            info!(
+                "EdgeDiag: {} | YES_ask={:.3} NO_ask={:.3} combined={:.3} \
+                 raw_edge={:+.3} fee_cost={:.3} required={:.3} → {}",
+                &pair.condition_id[..pair.condition_id.len().min(12)],
+                yes_ask,
+                no_ask,
+                combined,
+                raw_edge,
+                fee_cost,
+                required,
+                label,
+            );
+            any_logged = true;
+        }
+
+        if !any_logged {
+            info!("EdgeDiag: no books received yet for any registered market pair");
+        }
+
+        // One-time hint when all markets are rejected due to fees
+        let all_fee_blocked = pairs.iter().all(|p| {
+            let ya = self.order_book_state.best_ask(&p.yes_token_id);
+            let na = self.order_book_state.best_ask(&p.no_token_id);
+            match (ya, na) {
+                (Some(y), Some(n)) => {
+                    let combined = y + n;
+                    combined >= Decimal::ONE || {
+                        let fee_cost = Decimal::from(p.fee_rate_bps) / dec!(10000) * combined;
+                        (Decimal::ONE - combined) < fee_cost + taker_min_edge
+                    }
+                }
+                _ => true,
+            }
+        });
+
+        if all_fee_blocked && !pairs.is_empty() {
+            info!(
+                "EdgeDiag: all markets below required edge. \
+                 For 15-min crypto markets (fee_rate=1000bps/10%), required edge ≈ 10%+3¢. \
+                 Consider enabling TemporalArbStrategy (TEMPORAL_ARB_ENABLED=true) which \
+                 trades momentum rather than pure arb."
+            );
+        }
     }
 
     /// Handle a full book snapshot message
