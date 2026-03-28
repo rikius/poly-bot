@@ -1,7 +1,9 @@
 //! Configuration management for the Polymarket bot
 
+use crate::alerts::{AlertBackend, AlertSender};
 use crate::error::{BotError, Result};
 use rust_decimal::Decimal;
+use std::sync::Arc;
 use std::str::FromStr;
 
 /// Bot configuration loaded from environment
@@ -44,6 +46,16 @@ pub struct Config {
     pub temporal_arb_threshold_bps: i64,
     /// Sensitivity parameter: bps_move / sensitivity → probability shift (default 2000)
     pub temporal_arb_sensitivity_bps: i64,
+
+    // Alerting configuration
+    /// Alert backend: "discord", "telegram", or None
+    pub alert_backend: Option<String>,
+    /// Discord incoming webhook URL (used when alert_backend = "discord")
+    pub discord_webhook_url: Option<String>,
+    /// Telegram bot token (used when alert_backend = "telegram")
+    pub telegram_bot_token: Option<String>,
+    /// Telegram chat ID (used when alert_backend = "telegram")
+    pub telegram_chat_id: Option<String>,
 }
 
 /// Operating mode for the bot
@@ -137,6 +149,12 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(2000i64);
 
+        // Alerting
+        let alert_backend = std::env::var("ALERT_BACKEND").ok();
+        let discord_webhook_url = std::env::var("DISCORD_WEBHOOK_URL").ok();
+        let telegram_bot_token = std::env::var("TELEGRAM_BOT_TOKEN").ok();
+        let telegram_chat_id = std::env::var("TELEGRAM_CHAT_ID").ok();
+
         Ok(Config {
             api_key,
             secret_key: secret_key.map(|s| s.trim_matches('"').to_string()),
@@ -157,7 +175,28 @@ impl Config {
             temporal_arb_enabled,
             temporal_arb_threshold_bps,
             temporal_arb_sensitivity_bps,
+            alert_backend,
+            discord_webhook_url,
+            telegram_bot_token,
+            telegram_chat_id,
         })
+    }
+
+    /// Build an [`AlertSender`] from the current configuration, if a valid
+    /// backend is configured.  Returns `None` when alerting is disabled.
+    pub fn alert_sender(&self) -> Option<Arc<AlertSender>> {
+        match self.alert_backend.as_deref() {
+            Some("discord") => {
+                let url = self.discord_webhook_url.clone()?;
+                Some(AlertSender::new(AlertBackend::Discord { url }))
+            }
+            Some("telegram") => {
+                let token = self.telegram_bot_token.clone()?;
+                let chat_id = self.telegram_chat_id.clone()?;
+                Some(AlertSender::new(AlertBackend::Telegram { token, chat_id }))
+            }
+            _ => None,
+        }
     }
 
     /// Check if running in paper trading mode

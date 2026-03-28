@@ -11,6 +11,7 @@
 //! - `strategy` - Pluggable trading strategies
 //! - `risk` - Circuit breaker and risk limits
 
+pub mod alerts;
 pub mod api;
 pub mod bot;
 pub mod config;

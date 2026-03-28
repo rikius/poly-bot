@@ -15,6 +15,7 @@
 //! - Heartbeat for logging (10s)
 //! - Async kill signal for shutdown
 
+use crate::alerts::AlertSender;
 use crate::config::{Config, OperatingMode};
 use crate::execution::{DualPolicy, ExecutionResult, ExecutionStatus, OrderExecutor, OrderTracker};
 use crate::feeds::{new_price_store, ExternalPriceStore};
@@ -92,6 +93,11 @@ pub struct Bot {
     heartbeat_count: u32,
     /// External price store for temporal arb (Binance feed writes here)
     external_prices: ExternalPriceStore,
+    /// Optional alert sender for circuit breaker / WS reconnect notifications
+    alerts: Option<Arc<AlertSender>>,
+    /// Tracks whether the circuit breaker was open at the last heartbeat, so
+    /// we fire an alert exactly once on each Open transition.
+    circuit_was_open: bool,
 }
 
 impl Bot {
@@ -300,6 +306,9 @@ impl Bot {
             strategy_router.strategy_names().len()
         );
 
+        // Build alert sender before moving config into the struct
+        let alerts = config.alert_sender();
+
         Self {
             config,
             kill_switch,
@@ -323,6 +332,8 @@ impl Bot {
             latency,
             heartbeat_count: 0,
             external_prices,
+            alerts,
+            circuit_was_open: false,
         }
     }
 
@@ -370,7 +381,7 @@ impl Bot {
 
                 // Heartbeat - 10s periodic logging
                 _ = heartbeat_interval.tick() => {
-                    self.log_heartbeat();
+                    self.log_heartbeat().await;
                 }
 
                 // Kill signal - graceful shutdown
@@ -395,6 +406,9 @@ impl Bot {
             }
             MarketMessage::Reconnecting => {
                 warn!("WebSocket reconnecting...");
+                if let Some(ref alerts) = self.alerts {
+                    alerts.send_ws_reconnect().await;
+                }
             }
             MarketMessage::BookSnapshot(book_msg) => {
                 self.handle_book_snapshot(book_msg).await;
@@ -497,7 +511,8 @@ impl Bot {
 
     /// Log heartbeat with current stats (every 10s).
     /// Latency histograms are logged and reset every 60s (every 6th heartbeat).
-    fn log_heartbeat(&mut self) {
+    /// Fires an alert if the circuit breaker just transitioned to Open.
+    async fn log_heartbeat(&mut self) {
         let mode_str = match self.config.mode {
             OperatingMode::Paper => "PAPER",
             OperatingMode::Live => "LIVE",
@@ -545,6 +560,20 @@ impl Bot {
                 self.latency.submit_to_ack.reset();
             }
         }
+
+        // Detect circuit breaker transition → Open and fire alert exactly once.
+        let is_open = !self.circuit_breaker.is_trading_allowed();
+        if is_open && !self.circuit_was_open {
+            if let Some(ref alerts) = self.alerts {
+                let reason = self
+                    .circuit_breaker
+                    .open_reason()
+                    .map(|r| r.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                alerts.send_circuit_breaker_trip(&reason).await;
+            }
+        }
+        self.circuit_was_open = is_open;
     }
 
     /// Handle a full book snapshot message
