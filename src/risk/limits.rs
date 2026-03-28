@@ -6,7 +6,9 @@
 use crate::websocket::types::{Side, TokenId};
 use crate::constants::*;
 use crate::ledger::Ledger;
+use crate::strategy::market_pair::MarketPairRegistry;
 use rust_decimal::Decimal;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 use tracing::error;
@@ -164,15 +166,20 @@ impl RiskLimits {
         *self.daily_realized_pnl.write().unwrap() = Decimal::ZERO;
     }
 
-    /// Update daily P&L from a fill
-    pub fn record_realized_pnl(&self, pnl: Decimal) {
-        let mut daily_pnl = self.daily_realized_pnl.write().unwrap();
-        *daily_pnl += pnl;
+    /// Update daily P&L from a fill and re-check the limit.
+    ///
+    /// Pass `current_unrealized` (from the ledger's position tracker) so the
+    /// check includes mark-to-market losses on open positions.
+    pub fn record_realized_pnl(&self, pnl: Decimal, current_unrealized: Decimal) {
+        let mut daily_realized = self.daily_realized_pnl.write().unwrap();
+        *daily_realized += pnl;
 
-        // Check if we've exceeded daily loss limit
-        if *daily_pnl < -self.config.max_daily_loss {
+        // Check realized + unrealized combined so that a deeply underwater
+        // open position halts trading before it is actually closed.
+        let total = *daily_realized + current_unrealized;
+        if total < -self.config.max_daily_loss {
             self.halt_trading(LimitViolation::DailyLossExceeded {
-                current_loss: -*daily_pnl,
+                current_loss: -total,
                 limit: self.config.max_daily_loss,
             });
         }
@@ -238,10 +245,18 @@ impl RiskLimits {
         let current_position = ledger.get_position(token_id);
         let current_exposure = current_position.shares.abs() * current_position.avg_cost;
         let new_exposure = if side == Side::Buy {
+            // Buying always increases or opens a long position → exposure grows.
             current_exposure + order_value
         } else {
-            // Selling reduces exposure
-            (current_exposure - order_value).max(Decimal::ZERO)
+            // Selling: closing a long reduces exposure; opening/extending a short
+            // increases it.  Use the actual share count to determine direction.
+            if current_position.is_long() {
+                // Closing long: exposure decreases (floor at zero)
+                (current_exposure - order_value).max(Decimal::ZERO)
+            } else {
+                // Flat or already short: selling opens/extends a short position
+                current_exposure + order_value
+            }
         };
 
         if new_exposure > self.config.max_position_exposure {
@@ -256,11 +271,14 @@ impl RiskLimits {
     }
 
     /// Check all limits against current ledger state
-    pub fn check_all(&self, ledger: &Ledger) -> Vec<LimitViolation> {
+    pub fn check_all(&self, ledger: &Ledger, registry: Option<&MarketPairRegistry>) -> Vec<LimitViolation> {
         let mut violations = Vec::new();
 
-        // Check daily loss
-        let daily_pnl = *self.daily_realized_pnl.read().unwrap();
+        // Check daily loss — include unrealized P&L so that an open position
+        // that is deeply underwater triggers the halt before it is closed.
+        let daily_realized = *self.daily_realized_pnl.read().unwrap();
+        let daily_unrealized = ledger.positions.total_unrealized_pnl();
+        let daily_pnl = daily_realized + daily_unrealized;
         if daily_pnl < -self.config.max_daily_loss {
             violations.push(LimitViolation::DailyLossExceeded {
                 current_loss: -daily_pnl,
@@ -268,9 +286,10 @@ impl RiskLimits {
             });
         }
 
-        // Check open orders
+        // Check open orders — use >= to match check_order's pre-trade gate
+        // (both block at exactly max_open_orders, not one order past it).
         let open_orders = ledger.open_orders_count();
-        if open_orders > self.config.max_open_orders {
+        if open_orders >= self.config.max_open_orders {
             violations.push(LimitViolation::MaxOpenOrdersExceeded {
                 current: open_orders,
                 limit: self.config.max_open_orders,
@@ -278,7 +297,7 @@ impl RiskLimits {
         }
 
         // Check unhedged exposure
-        let unhedged = self.calculate_unhedged_exposure(ledger);
+        let unhedged = self.calculate_unhedged_exposure(ledger, registry);
         if unhedged > self.config.max_unhedged_exposure {
             violations.push(LimitViolation::MaxUnhedgedExposureExceeded {
                 current: unhedged,
@@ -291,17 +310,57 @@ impl RiskLimits {
 
     /// Calculate unhedged directional exposure
     ///
-    /// For binary markets (YES/NO), a hedged position has equal YES and NO.
-    /// Unhedged exposure is the net directional bet.
-    pub fn calculate_unhedged_exposure(&self, ledger: &Ledger) -> Decimal {
+    /// For binary markets (YES/NO or Up/Down), a perfectly hedged position has
+    /// equal notional on both legs. Unhedged exposure per market pair is:
+    ///
+    ///   |yes_notional - no_notional|
+    ///
+    /// When registry is `None` (not yet initialised), falls back to summing all
+    /// absolute position notionals — a conservative over-estimate that keeps
+    /// trading safe during startup.
+    pub fn calculate_unhedged_exposure(
+        &self,
+        ledger: &Ledger,
+        registry: Option<&MarketPairRegistry>,
+    ) -> Decimal {
         let snapshot = ledger.snapshot();
-        let mut total_unhedged = Decimal::ZERO;
 
-        // Group positions by market (simplified - assumes token IDs can be paired)
-        // For now, sum absolute values of all positions
+        let Some(registry) = registry else {
+            // Conservative fallback: sum all absolute position notionals
+            return snapshot
+                .positions
+                .iter()
+                .map(|pos| pos.shares.abs() * pos.avg_cost)
+                .fold(Decimal::ZERO, |acc, v| acc + v);
+        };
+
+        let mut total_unhedged = Decimal::ZERO;
+        // Track which condition IDs we've already accounted for
+        let mut seen: HashSet<String> = HashSet::new();
+
         for pos in &snapshot.positions {
-            let exposure = pos.shares.abs() * pos.avg_cost;
-            total_unhedged += exposure;
+            if let Some(pair) = registry.get_by_token(&pos.token_id) {
+                if !seen.insert(pair.condition_id.clone()) {
+                    // Already processed this market pair via its complement
+                    continue;
+                }
+
+                // Find the paired position (complement token)
+                let complement_id = pair.complement(&pos.token_id).cloned();
+                let complement_notional = complement_id
+                    .and_then(|cid| {
+                        snapshot.positions.iter().find(|p| p.token_id == cid)
+                    })
+                    .map(|p| p.shares.abs() * p.avg_cost)
+                    .unwrap_or(Decimal::ZERO);
+
+                let this_notional = pos.shares.abs() * pos.avg_cost;
+                // Net directional exposure for this market pair
+                total_unhedged += (this_notional - complement_notional).abs();
+            } else {
+                // Token not registered in any pair — treat as fully unhedged
+                total_unhedged += pos.shares.abs() * pos.avg_cost;
+            }
         }
 
         total_unhedged
@@ -383,11 +442,11 @@ mod tests {
         let limits = RiskLimits::with_config(config);
 
         // Record loss within limit
-        limits.record_realized_pnl(dec!(-50));
+        limits.record_realized_pnl(dec!(-50), Decimal::ZERO);
         assert!(limits.is_trading_allowed());
 
         // Record loss exceeding limit
-        limits.record_realized_pnl(dec!(-60));
+        limits.record_realized_pnl(dec!(-60), Decimal::ZERO);
         assert!(!limits.is_trading_allowed());
         assert!(matches!(
             limits.halt_reason(),
@@ -463,7 +522,7 @@ mod tests {
         let limits = RiskLimits::with_config(config);
 
         // Trigger halt
-        limits.record_realized_pnl(dec!(-150));
+        limits.record_realized_pnl(dec!(-150), Decimal::ZERO);
         assert!(!limits.is_trading_allowed());
 
         // Reset for new day
@@ -475,8 +534,8 @@ mod tests {
     #[test]
     fn test_stats() {
         let limits = RiskLimits::new();
-        limits.record_realized_pnl(dec!(100));
-        limits.record_realized_pnl(dec!(-30));
+        limits.record_realized_pnl(dec!(100), Decimal::ZERO);
+        limits.record_realized_pnl(dec!(-30), Decimal::ZERO);
 
         let stats = limits.stats();
         assert_eq!(stats.daily_pnl, dec!(70));

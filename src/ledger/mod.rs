@@ -48,12 +48,32 @@ impl Ledger {
 
     /// Process a confirmed fill
     ///
-    /// Updates: positions, cash, order state
-    pub fn process_fill(&self, fill: Fill) {
-        // 1. Update position
+    /// Updates: positions, cash, order state.
+    /// Automatically resolves `expected_price` from the tracked order (if not
+    /// already set) so that slippage is computed against the original limit price.
+    pub fn process_fill(&self, mut fill: Fill) {
+        // 1. Resolve expected price from the tracked order when not explicitly set.
+        //    This allows callers (e.g., the WebSocket user handler) to pass a bare
+        //    fill and have slippage computed automatically.
+        if fill.expected_price.is_none() {
+            fill.expected_price = self
+                .orders
+                .get_by_order_id(&fill.order_id)
+                .map(|o| o.price);
+        }
+
+        // 2. Compute slippage cost now that expected_price is resolved.
+        fill.slippage_cost = fill.expected_price.map(|exp| {
+            match fill.side {
+                Side::Buy  => (fill.price - exp) * fill.size,
+                Side::Sell => (exp - fill.price) * fill.size,
+            }
+        }).unwrap_or(Decimal::ZERO);
+
+        // 3. Update position
         self.positions.apply_fill(&fill);
 
-        // 2. Update cash
+        // 4. Update cash
         match fill.side {
             Side::Buy => {
                 // Bought shares - remove cash from reserved
@@ -65,11 +85,19 @@ impl Ledger {
             }
         }
 
-        // 3. Deduct fees
+        // 5. Deduct fees
         self.cash.deduct_fee(fill.fee);
 
-        // 4. Store fill for history
-        self.fills.write().unwrap().push(fill);
+        // 6. Store fill for history (cap at 10 000 entries to bound memory use;
+        //    drain the oldest half when the limit is reached).
+        {
+            const MAX_FILLS: usize = 10_000;
+            let mut fills = self.fills.write().unwrap();
+            fills.push(fill);
+            if fills.len() > MAX_FILLS {
+                fills.drain(0..MAX_FILLS / 2);
+            }
+        }
     }
 
     /// Get all fills
@@ -97,6 +125,7 @@ impl Ledger {
             realized_pnl: self.positions.total_realized_pnl(),
             unrealized_pnl: self.positions.total_unrealized_pnl(),
             total_fees: self.positions.total_fees(),
+            total_slippage_cost: self.positions.total_slippage_cost(),
             fill_count: self.fills.read().unwrap().len(),
         }
     }
@@ -154,6 +183,8 @@ pub struct LedgerSnapshot {
     pub realized_pnl: Decimal,
     pub unrealized_pnl: Decimal,
     pub total_fees: Decimal,
+    /// Cumulative slippage cost across all positions (positive = unfavourable)
+    pub total_slippage_cost: Decimal,
     pub fill_count: usize,
 }
 
@@ -192,6 +223,8 @@ mod tests {
             price: dec!(0.50),
             size: dec!(200),
             fee: dec!(0.50),
+            expected_price: None,
+            slippage_cost: Decimal::ZERO,
             timestamp: Utc::now(),
         };
         ledger.process_fill(fill);
@@ -220,6 +253,8 @@ mod tests {
             price: dec!(0.40),
             size: dec!(100),
             fee: dec!(0),
+            expected_price: None,
+            slippage_cost: Decimal::ZERO,
             timestamp: Utc::now(),
         };
         // Reserve and process
@@ -235,6 +270,8 @@ mod tests {
             price: dec!(0.60),
             size: dec!(100),
             fee: dec!(0.30),
+            expected_price: None,
+            slippage_cost: Decimal::ZERO,
             timestamp: Utc::now(),
         };
         ledger.process_fill(sell_fill);

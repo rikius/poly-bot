@@ -104,6 +104,10 @@ impl TradeNotification {
             price,
             size,
             fee,
+            // expected_price and slippage_cost are resolved by Ledger::process_fill,
+            // which looks up the originating TrackedOrder by order_id.
+            expected_price: None,
+            slippage_cost: Decimal::ZERO,
             timestamp,
         })
     }

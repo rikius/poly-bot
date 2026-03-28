@@ -15,17 +15,26 @@
 //! - Heartbeat for logging (10s)
 //! - Async kill signal for shutdown
 
+use crate::alerts::AlertSender;
+use crate::api::ControlState;
 use crate::config::{Config, OperatingMode};
 use crate::execution::{DualPolicy, ExecutionResult, ExecutionStatus, OrderExecutor, OrderTracker};
+use crate::feeds::{new_price_store, ExternalPriceStore};
+use crate::feeds::binance::BinanceFeed;
 use crate::kill_switch::KillSwitch;
-use crate::ledger::Ledger;
+use crate::ledger::{Fill, Ledger};
+use crate::metrics::BotLatency;
 use crate::risk::CircuitBreaker;
 use crate::state::OrderBookState;
 use crate::strategy::{
-    MarketPair, MarketPairRegistry, MathArbStrategy, OrderIntent, StrategyContext, StrategyRouter,
+    MakerRebateArbStrategy, MakerRebateConfig, MarketPair, MarketPairRegistry, MathArbStrategy,
+    OrderIntent, StrategyContext, StrategyRouter, TemporalArbConfig, TemporalArbStrategy,
 };
 use crate::websocket::{MarketMessage, MarketWebSocket, UserMessage, UserWebSocket};
+use crate::websocket::types::Side;
 use alloy_signer_local::PrivateKeySigner;
+use chrono::Utc;
+use rust_decimal::Decimal;
 use polymarket_client_sdk::auth::{Credentials, Signer as _};
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::POLYGON;
@@ -79,9 +88,48 @@ pub struct Bot {
     total_executions: u64,
     /// Total fills received
     total_fills: u64,
+    /// Shared latency histograms (also passed to executor)
+    latency: Arc<BotLatency>,
+    /// Heartbeat tick counter — used to trigger periodic histogram reset (every 6 ticks = 60s)
+    heartbeat_count: u32,
+    /// External price store for temporal arb (Binance feed writes here; read by TemporalArbStrategy)
+    _external_prices: ExternalPriceStore,
+    /// Optional alert sender for circuit breaker / WS reconnect notifications
+    alerts: Option<Arc<AlertSender>>,
+    /// Tracks whether the circuit breaker was open at the last heartbeat, so
+    /// we fire an alert exactly once on each Open transition.
+    circuit_was_open: bool,
+    /// Mutable runtime controls shared with the API server (pause/resume, config).
+    controls: Arc<ControlState>,
 }
 
 impl Bot {
+    /// Expose shared state for the API server.
+    ///
+    /// Call this *after* `Bot::new` but *before* `Bot::run` to obtain
+    /// Arc handles that the API server needs.
+    pub fn shared_state(
+        &self,
+    ) -> (
+        Arc<crate::ledger::Ledger>,
+        Arc<OrderBookState>,
+        Arc<Config>,
+        Arc<BotLatency>,
+        Arc<ControlState>,
+        Option<Arc<OrderExecutor>>,
+        Arc<MarketPairRegistry>,
+    ) {
+        (
+            Arc::clone(&self.ledger),
+            Arc::clone(&self.order_book_state),
+            Arc::clone(&self.config),
+            Arc::clone(&self.latency),
+            Arc::clone(&self.controls),
+            self.executor.clone(),
+            Arc::clone(&self.market_registry),
+        )
+    }
+
     /// Create a new bot instance
     ///
     /// # Arguments
@@ -127,11 +175,71 @@ impl Bot {
             warn!("Failed to register MathArbStrategy: {}", e);
         }
 
+        // Shared external price store (populated by Binance feed when enabled)
+        let external_prices = new_price_store();
+
+        // Optionally register MakerRebateArbStrategy (MAKER_REBATE_ENABLED=true)
+        if config.maker_rebate_enabled {
+            info!(
+                ttl_secs = config.maker_order_ttl_secs,
+                "Registering MakerRebateArbStrategy (passive GTC arb, earns maker rebates)"
+            );
+            let rebate_config = MakerRebateConfig {
+                ttl_secs: config.maker_order_ttl_secs,
+                ..MakerRebateConfig::default()
+            };
+            let maker_rebate = Arc::new(MakerRebateArbStrategy::with_config(
+                market_registry.clone(),
+                rebate_config,
+            ));
+            if let Err(e) = strategy_router.register(maker_rebate) {
+                warn!("Failed to register MakerRebateArbStrategy: {}", e);
+            }
+        }
+
+        // Optionally register TemporalArbStrategy + start Binance feed (TEMPORAL_ARB_ENABLED=true)
+        if config.temporal_arb_enabled {
+            info!(
+                threshold_bps = config.temporal_arb_threshold_bps,
+                sensitivity_bps = config.temporal_arb_sensitivity_bps,
+                "Registering TemporalArbStrategy + starting Binance price feed"
+            );
+            let temporal_config = TemporalArbConfig {
+                threshold_bps: config.temporal_arb_threshold_bps,
+                sensitivity_bps: config.temporal_arb_sensitivity_bps,
+                ..TemporalArbConfig::default()
+            };
+            let temporal = Arc::new(TemporalArbStrategy::with_config(
+                market_registry.clone(),
+                Arc::clone(&external_prices),
+                temporal_config,
+            ));
+            if let Err(e) = strategy_router.register(temporal) {
+                warn!("Failed to register TemporalArbStrategy: {}", e);
+            }
+
+            // Spawn Binance WebSocket feed task
+            let feed = BinanceFeed::new(Arc::clone(&external_prices));
+            tokio::spawn(async move {
+                feed.run().await;
+            });
+        }
+
         // Set up circuit breaker for risk management
         let circuit_breaker = Arc::new(CircuitBreaker::new());
 
+
         // Set up order tracker for outstanding orders
         let order_tracker = Arc::new(OrderTracker::new());
+
+        // Shared latency histograms (threaded into executor as well)
+        let latency = BotLatency::new();
+
+        // Build runtime controls (shared with API server for pause/resume/config)
+        let controls = ControlState::new(&config);
+
+        // Build alert sender early so it can be shared with the executor
+        let alerts = config.alert_sender();
 
         // Authenticate and set up executor + user WS only if credentials are available
         let (executor, user_ws_rx, user_ws_task) = if config.has_credentials() {
@@ -175,6 +283,8 @@ impl Bot {
                 signer,
                 policy,
                 circuit_breaker.clone(),
+                Arc::clone(&latency),
+                alerts.clone(),
             ));
 
             // Set up User WebSocket for fill notifications
@@ -237,6 +347,12 @@ impl Bot {
             total_intents: 0,
             total_executions: 0,
             total_fills: 0,
+            latency,
+            heartbeat_count: 0,
+            _external_prices: external_prices,
+            alerts,
+            circuit_was_open: false,
+            controls,
         }
     }
 
@@ -284,7 +400,7 @@ impl Bot {
 
                 // Heartbeat - 10s periodic logging
                 _ = heartbeat_interval.tick() => {
-                    self.log_heartbeat();
+                    self.log_heartbeat().await;
                 }
 
                 // Kill signal - graceful shutdown
@@ -309,6 +425,9 @@ impl Bot {
             }
             MarketMessage::Reconnecting => {
                 warn!("WebSocket reconnecting...");
+                if let Some(ref alerts) = self.alerts {
+                    alerts.send_ws_reconnect().await;
+                }
             }
             MarketMessage::BookSnapshot(book_msg) => {
                 self.handle_book_snapshot(book_msg).await;
@@ -409,8 +528,10 @@ impl Bot {
         }
     }
 
-    /// Log heartbeat with current stats
-    fn log_heartbeat(&mut self) {
+    /// Log heartbeat with current stats (every 10s).
+    /// Latency histograms are logged and reset every 60s (every 6th heartbeat).
+    /// Fires an alert if the circuit breaker just transitioned to Open.
+    async fn log_heartbeat(&mut self) {
         let mode_str = match self.config.mode {
             OperatingMode::Paper => "PAPER",
             OperatingMode::Live => "LIVE",
@@ -420,23 +541,164 @@ impl Bot {
         } else {
             "🔴 OPEN"
         };
-        
+
         let active_orders = self.order_tracker.active_count();
-        
+
         info!(
             "Heartbeat [{}]: {} markets | {} msgs | {:.1} msg/s | {} intents | {} execs | {} fills | {} active | CB: {}",
             mode_str,
             self.order_book_state.num_markets(),
             self.total_messages,
-            self.total_messages as f64 / 10.0,  // msgs per second (over 10s window)
+            self.total_messages as f64 / 10.0,
             self.total_intents,
             self.total_executions,
             self.total_fills,
             active_orders,
             circuit_status
         );
-        // Reset counter for next interval
         self.total_messages = 0;
+
+        self.heartbeat_count += 1;
+        if self.heartbeat_count % 6 == 0 {
+            // Log latency summary every 60s then reset for the next window
+            let book = self.latency.book_to_intent.stats();
+            let submit = self.latency.submit_to_ack.stats();
+
+            if book.count > 0 {
+                info!(
+                    "Latency book→intent: p50={}µs p95={}µs p99={}µs (n={})",
+                    book.p50_us, book.p95_us, book.p99_us, book.count
+                );
+                self.latency.book_to_intent.reset();
+            }
+            if submit.count > 0 {
+                info!(
+                    "Latency submit→ack:  p50={}µs p95={}µs p99={}µs (n={})",
+                    submit.p50_us, submit.p95_us, submit.p99_us, submit.count
+                );
+                self.latency.submit_to_ack.reset();
+            }
+
+            // Edge diagnostics: show why each market pair is/isn't generating intents
+            self.log_edge_diagnostics();
+        }
+
+        // Detect circuit breaker transition → Open and fire alert exactly once.
+        let is_open = !self.circuit_breaker.is_trading_allowed();
+        if is_open && !self.circuit_was_open {
+            if let Some(ref alerts) = self.alerts {
+                let reason = self
+                    .circuit_breaker
+                    .open_reason()
+                    .map(|r| r.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                alerts.send_circuit_breaker_trip(&reason).await;
+            }
+        }
+        self.circuit_was_open = is_open;
+    }
+
+    /// Log per-market edge diagnostics (why no intents are generated).
+    ///
+    /// Called every 60s.  For each registered market pair we compute:
+    ///   raw_edge  = 1 - YES_ask - NO_ask
+    ///   fee_cost  = fee_rate_bps / 10_000 * (YES_ask + NO_ask)
+    ///   tradeable = raw_edge > fee_cost + min_edge (3¢ taker / 1¢ maker)
+    ///
+    /// This makes it immediately visible in the log whether the strategy is
+    /// silently passing due to unfavourable odds (the normal case for
+    /// 15-min crypto markets with 10% fees) versus a configuration issue.
+    fn log_edge_diagnostics(&self) {
+        use rust_decimal_macros::dec;
+
+        let pairs = self.market_registry.all_pairs();
+        if pairs.is_empty() {
+            return;
+        }
+
+        // The minimum edge the taker strategy requires on top of fees
+        let taker_min_edge = dec!(0.03);
+
+        let mut any_logged = false;
+        for pair in &pairs {
+            let yes_ask = match self.order_book_state.best_ask(&pair.yes_token_id) {
+                Some(v) => v,
+                None => continue,
+            };
+            let no_ask = match self.order_book_state.best_ask(&pair.no_token_id) {
+                Some(v) => v,
+                None => continue,
+            };
+            let yes_bid = self.order_book_state.best_bid(&pair.yes_token_id);
+            let no_bid = self.order_book_state.best_bid(&pair.no_token_id);
+
+            let combined = yes_ask + no_ask;
+            let raw_edge = Decimal::ONE - combined;
+            let fee_rate = Decimal::from(pair.fee_rate_bps) / dec!(10000);
+            let fee_cost = fee_rate * combined;
+            let required = fee_cost + taker_min_edge;
+            let tradeable = raw_edge >= required;
+
+            // YES_mid + NO_mid ≈ 1 in efficient markets (this is the true
+            // probability relationship; asks can both be high in thin books).
+            let yes_mid = yes_bid.map(|b| (yes_ask + b) / dec!(2));
+            let no_mid = no_bid.map(|b| (no_ask + b) / dec!(2));
+            let mid_sum = yes_mid.zip(no_mid).map(|(y, n)| y + n);
+
+            let label = if combined > dec!(1.5) {
+                "thin book — stale protective orders (combined >> 1)"
+            } else if combined >= Decimal::ONE {
+                "combined≥1.00 — no arb (efficient market)"
+            } else if !tradeable {
+                "edge < fees+min_edge"
+            } else {
+                "TRADEABLE"
+            };
+
+            info!(
+                "EdgeDiag: {} | ask={:.3}+{:.3}={:.3} mid_sum={} \
+                 raw_edge={:+.3} fee_cost={:.3} required={:.3} → {}",
+                &pair.condition_id[..pair.condition_id.len().min(12)],
+                yes_ask,
+                no_ask,
+                combined,
+                mid_sum.map(|m| format!("{:.3}", m)).unwrap_or_else(|| "n/a".into()),
+                raw_edge,
+                fee_cost,
+                required,
+                label,
+            );
+            any_logged = true;
+        }
+
+        if !any_logged {
+            info!("EdgeDiag: no books received yet for any registered market pair");
+        }
+
+        // One-time hint when all markets are rejected due to fees
+        let all_fee_blocked = pairs.iter().all(|p| {
+            let ya = self.order_book_state.best_ask(&p.yes_token_id);
+            let na = self.order_book_state.best_ask(&p.no_token_id);
+            match (ya, na) {
+                (Some(y), Some(n)) => {
+                    let combined = y + n;
+                    combined >= Decimal::ONE || {
+                        let fee_cost = Decimal::from(p.fee_rate_bps) / dec!(10000) * combined;
+                        (Decimal::ONE - combined) < fee_cost + taker_min_edge
+                    }
+                }
+                _ => true,
+            }
+        });
+
+        if all_fee_blocked && !pairs.is_empty() {
+            info!(
+                "EdgeDiag: all markets below required edge. \
+                 For 15-min crypto markets (fee_rate=1000bps/10%), required edge ≈ 10%+3¢. \
+                 Consider enabling TemporalArbStrategy (TEMPORAL_ARB_ENABLED=true) which \
+                 trades momentum rather than pure arb."
+            );
+        }
     }
 
     /// Handle a full book snapshot message
@@ -478,15 +740,24 @@ impl Bot {
 
     /// Route a book update to strategies and process intents
     fn route_book_update(&mut self, market_id: &str, token_id: &str) {
+        // Honour API pause — drop all intents without touching the circuit breaker
+        if self.controls.is_paused() {
+            return;
+        }
+
         // Create strategy context
         let ctx = StrategyContext::new(&self.order_book_state, &self.ledger);
 
-        // Route to strategies
+        // Time strategy evaluation (book update receipt → intents returned)
+        let t0 = Instant::now();
         let intents = self.strategy_router.on_book_update(
             &market_id.to_string(),
             &token_id.to_string(),
             &ctx,
         );
+        self.latency
+            .book_to_intent
+            .record_us(t0.elapsed().as_micros() as u64);
 
         // Process any generated intents
         if !intents.is_empty() {
@@ -526,10 +797,9 @@ impl Bot {
         match self.config.mode {
             OperatingMode::Paper => {
                 info!(
-                    "📋 PAPER MODE: Would execute {} order(s) - not submitting",
+                    "📋 PAPER MODE: Simulating {} order(s)",
                     intents.len()
                 );
-                // In paper mode, we just log what would happen
                 for intent in &intents {
                     info!(
                         "  [PAPER] {} {} @ ${:.4} x {}",
@@ -539,6 +809,7 @@ impl Bot {
                         intent.size
                     );
                 }
+                self.simulate_paper_fills(&intents);
             }
             OperatingMode::Live => {
                 let Some(ref executor) = self.executor else {
@@ -556,6 +827,97 @@ impl Bot {
 
                 self.total_executions += intents.len() as u64;
             }
+        }
+    }
+
+    /// Simulate order fills in paper mode against the live order book.
+    ///
+    /// For each intent:
+    /// - BUY: fills at the current best ask if ask ≤ limit price
+    /// - SELL: fills at the current best bid if bid ≥ limit price
+    ///
+    /// On a successful simulated fill, the ledger is updated exactly as it
+    /// would be for a real fill (positions, cash, slippage, fees).
+    ///
+    /// Cash handling for BUY fills: because paper orders skip the normal
+    /// reserve → settle cycle, the notional is withdrawn directly from
+    /// `available`; the fee is then deducted by `process_fill`.
+    fn simulate_paper_fills(&self, intents: &[OrderIntent]) {
+        for intent in intents {
+            // Determine fill price from the counterside of the book
+            let fill_price = match intent.side {
+                Side::Buy => self
+                    .order_book_state
+                    .best_ask(&intent.token_id)
+                    .filter(|&ask| ask <= intent.price),
+                Side::Sell => self
+                    .order_book_state
+                    .best_bid(&intent.token_id)
+                    .filter(|&bid| bid >= intent.price),
+            };
+
+            let Some(fill_price) = fill_price else {
+                debug!(
+                    side = ?intent.side,
+                    token = %&intent.token_id[..intent.token_id.len().min(12)],
+                    limit = %intent.price,
+                    "Paper: no counterside at limit price, no fill"
+                );
+                continue;
+            };
+
+            let notional = fill_price * intent.size;
+
+            // Fee rate from the market pair registry (15-min crypto = 1000 bps = 10%)
+            let fee_rate_bps = self
+                .market_registry
+                .get_by_token(&intent.token_id)
+                .map(|p| p.fee_rate_bps)
+                .unwrap_or(0);
+            let fee = notional * Decimal::new(fee_rate_bps as i64, 4);
+
+            // For BUY: pre-deduct notional from available so that process_fill's
+            // settle_buy (which drains reserved, not available) doesn't double-count.
+            if intent.side == Side::Buy {
+                let total_cost = notional + fee;
+                if !self.ledger.cash.can_afford(total_cost) {
+                    warn!(
+                        token = %&intent.token_id[..intent.token_id.len().min(12)],
+                        needed = %total_cost,
+                        available = %self.ledger.cash.available(),
+                        "Paper: insufficient cash, skipping fill"
+                    );
+                    continue;
+                }
+                // Withdraw notional; fee will be deducted by process_fill.
+                let _ = self.ledger.cash.withdraw(notional);
+            }
+
+            let fill = Fill {
+                fill_id: format!("paper_{}", Uuid::new_v4()),
+                order_id: format!("paper_{}", Uuid::new_v4()),
+                token_id: intent.token_id.clone(),
+                side: intent.side,
+                price: fill_price,
+                size: intent.size,
+                fee,
+                // expected_price lets process_fill compute slippage against limit
+                expected_price: Some(intent.price),
+                slippage_cost: Decimal::ZERO,
+                timestamp: Utc::now(),
+            };
+
+            info!(
+                side = ?fill.side,
+                token = %&fill.token_id[..fill.token_id.len().min(12)],
+                fill_price = %fill_price,
+                limit_price = %intent.price,
+                size = %fill.size,
+                fee = %fee,
+                "Paper fill simulated"
+            );
+
+            self.ledger.process_fill(fill);
         }
     }
 

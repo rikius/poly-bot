@@ -11,14 +11,18 @@
 //! - `strategy` - Pluggable trading strategies
 //! - `risk` - Circuit breaker and risk limits
 
+pub mod alerts;
+pub mod api;
 pub mod bot;
 pub mod config;
 pub mod constants;
 pub mod error;
 pub mod execution;
+pub mod feeds;
 pub mod kill_switch;
 pub mod latency;
 pub mod ledger;
+pub mod metrics;
 pub mod risk;
 pub mod state;
 pub mod strategy;

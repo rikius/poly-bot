@@ -2,6 +2,8 @@
 //!
 //! High-frequency trading bot for Polymarket prediction markets.
 
+use polymarket_bot::api::{run_api_server, ApiState};
+use polymarket_bot::metrics::install_prometheus;
 use polymarket_bot::websocket::MarketDiscovery;
 use polymarket_bot::latency;
 use polymarket_bot::strategy::MarketPair;
@@ -17,6 +19,9 @@ async fn main() -> anyhow::Result<()> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
+
+    // Install Prometheus metrics recorder (must happen before any metrics macros)
+    let prometheus_handle = install_prometheus();
 
     // Initialize logging
     tracing_subscriber::fmt()
@@ -167,13 +172,23 @@ async fn main() -> anyhow::Result<()> {
         
         (pairs, tokens)
     } else {
-        // Fallback to hardcoded market for testing when API fails
-        warn!("No markets discovered - using hardcoded fallback");
-        
+        // Fallback to hardcoded market for testing when API fails.
+        // REFUSE to use stale token IDs in live mode — they may be expired
+        // and any order placed would be against the wrong (or non-existent) market.
+        if config.mode == polymarket_bot::config::OperatingMode::Live {
+            error!("Market discovery failed and BOT_MODE=live — refusing to start with hardcoded fallback");
+            error!("Fix the API connectivity issue or switch to paper mode.");
+            return Err(anyhow::anyhow!(
+                "No markets discovered in live mode — refusing to use hardcoded fallback"
+            ));
+        }
+
+        warn!("No markets discovered - using hardcoded fallback (paper mode only)");
+
         let yes_token = "91146426612524606788185897426983484145854573836093539884347307480474597236733".to_string();
         let no_token = "42146376778762047477642266233020835044794863565048464944940190870964136665187".to_string();
         let market_id = "0x_fallback_test".to_string();
-        
+
         let pairs = vec![
             MarketPair::new_up_down(
                 market_id,
@@ -182,16 +197,33 @@ async fn main() -> anyhow::Result<()> {
             )
             .with_description("FALLBACK TEST MARKET"),
         ];
-        
+
         let tokens = vec![yes_token, no_token];
-        
+
         (pairs, tokens)
     };
 
     info!("Registered {} market pair(s) with {} token(s)", market_pairs.len(), token_ids.len());
 
-    // Create and run the bot
+    // Create the bot
     let mut bot = Bot::new(config, kill_switch.clone(), token_ids, market_pairs, &selected.url).await;
+
+    // Start API server (shares read-only views of bot state)
+    {
+        let (ledger, obs, cfg, latency, controls, executor, registry) = bot.shared_state();
+        let api_state = Arc::new(ApiState::new(ledger, obs, cfg, latency, prometheus_handle, controls, executor, registry));
+        let api_port = std::env::var("API_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(3001);
+        tokio::spawn(async move {
+            if let Err(e) = run_api_server(api_state, api_port).await {
+                error!("API server fatal: {}", e);
+                std::process::exit(1);
+            }
+        });
+    }
+
     bot.run().await;
 
     // Graceful shutdown

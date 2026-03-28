@@ -57,14 +57,52 @@ services:
     env_file: .env
     volumes:
       - ledger-data:/app/data
+    expose:
+      - "3001"             # reachable by other compose services as bot:3001
     environment:
       - RUST_LOG=info
       - RUST_BACKTRACE=full
+      - API_PORT=3001
     tmpfs:
       - /tmp
+
+  # ---------------------------------------------------------------------------
+  # frontend-dev — Vite dev server with HMR, proxies /api and /ws to bot
+  #
+  #   docker compose up frontend-dev
+  # ---------------------------------------------------------------------------
+  frontend-dev:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+      - frontend-node-modules:/app/node_modules
+    ports:
+      - "5173:5173"
+    command: sh -c "npm install && npm run dev -- --host"
+    depends_on:
+      - bot
+    environment:
+      - NODE_ENV=development
+      - VITE_API_HOST=bot      # Docker service name — resolves to bot container
+      - VITE_API_PORT=3001
+
+  # ---------------------------------------------------------------------------
+  # frontend-build — builds the frontend for production (outputs to frontend/dist)
+  #
+  #   docker compose run --rm frontend-build
+  # ---------------------------------------------------------------------------
+  frontend-build:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+      - frontend-node-modules:/app/node_modules
+    command: sh -c "npm install && npm run build"
 
 volumes:
   ledger-data:
   cargo-registry:
   cargo-git:
   target-cache:
+  frontend-node-modules:

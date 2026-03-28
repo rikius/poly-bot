@@ -55,6 +55,21 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 # Configuration
 dotenvy = "0.15"
 
+# Frontend API server (HTTP + WebSocket)
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["cors", "fs"] }
+
+# Latency histograms — p50/p95/p99 for critical path instrumentation
+hdrhistogram = "7"
+
+# Binance WebSocket feed (temporal arb external price source)
+# v0.28 is already compiled by the SDK as a transitive dep (with rustls TLS)
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+
+# Prometheus metrics — exposes /metrics in text format for scraping
+metrics = "0.23"
+metrics-exporter-prometheus = { version = "0.15", default-features = false }
+
 
 [dev-dependencies]
 tokio-test = "0.4"
