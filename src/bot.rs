@@ -637,6 +637,11 @@ impl Bot {
         // The minimum edge the taker strategy requires on top of fees
         let taker_min_edge = dec!(0.03);
 
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+
         let mut any_logged = false;
         for pair in &pairs {
             let yes_ask = match self.order_book_state.best_ask(&pair.yes_token_id) {
@@ -649,6 +654,21 @@ impl Bot {
             };
             let yes_bid = self.order_book_state.best_bid(&pair.yes_token_id);
             let no_bid = self.order_book_state.best_bid(&pair.no_token_id);
+
+            // Book staleness: age of the most recently updated of the two sides.
+            let yes_age_ms = self.order_book_state.get_book(&pair.yes_token_id)
+                .and_then(|b| b.last_update)
+                .map(|ts| now_ms - ts);
+            let no_age_ms = self.order_book_state.get_book(&pair.no_token_id)
+                .and_then(|b| b.last_update)
+                .map(|ts| now_ms - ts);
+            let book_age_s = yes_age_ms.unwrap_or(i64::MAX)
+                .min(no_age_ms.unwrap_or(i64::MAX));
+            let age_label = if book_age_s == i64::MAX {
+                "age=unknown".to_string()
+            } else {
+                format!("age={:.1}s", book_age_s as f64 / 1000.0)
+            };
 
             let combined = yes_ask + no_ask;
             let raw_edge = Decimal::ONE - combined;
@@ -675,7 +695,7 @@ impl Bot {
 
             info!(
                 "EdgeDiag: {} | ask={:.3}+{:.3}={:.3} mid_sum={} \
-                 raw_edge={:+.3} fee_cost={:.3} required={:.3} → {}",
+                 raw_edge={:+.3} fee_cost={:.3} required={:.3} {} → {}",
                 &pair.condition_id[..pair.condition_id.len().min(12)],
                 yes_ask,
                 no_ask,
@@ -684,20 +704,22 @@ impl Bot {
                 raw_edge,
                 fee_cost,
                 required,
+                age_label,
                 label,
             );
 
-            // Log top-3 book depth so we can see if real orders exist below protective 0.990
+            // Log top-3 book depth at INFO so real order levels are always visible.
+            // Best ask = first entry (lowest price), best bid = first entry (highest price).
             let (yes_bids, yes_asks) = self.order_book_state.top_levels(&pair.yes_token_id, 3);
             let (no_bids, no_asks) = self.order_book_state.top_levels(&pair.no_token_id, 3);
             let fmt_levels = |levels: &[(Decimal, Decimal)]| -> String {
                 levels.iter().map(|(p, s)| format!("{:.3}x{:.0}", p, s)).collect::<Vec<_>>().join(" ")
             };
-            debug!(
+            info!(
                 "  YES bids=[{}] asks=[{}]",
                 fmt_levels(&yes_bids), fmt_levels(&yes_asks),
             );
-            debug!(
+            info!(
                 "  NO  bids=[{}] asks=[{}]",
                 fmt_levels(&no_bids), fmt_levels(&no_asks),
             );
