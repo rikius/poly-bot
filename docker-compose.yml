@@ -63,8 +63,39 @@ services:
     tmpfs:
       - /tmp
 
+  # ---------------------------------------------------------------------------
+  # frontend-dev — Vite dev server with HMR, proxies /api and /ws to bot
+  #
+  #   docker compose up frontend-dev
+  # ---------------------------------------------------------------------------
+  frontend-dev:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+      - frontend-node-modules:/app/node_modules
+    ports:
+      - "5173:5173"
+    command: sh -c "npm install && npm run dev -- --host"
+    environment:
+      - NODE_ENV=development
+
+  # ---------------------------------------------------------------------------
+  # frontend-build — builds the frontend for production (outputs to frontend/dist)
+  #
+  #   docker compose run --rm frontend-build
+  # ---------------------------------------------------------------------------
+  frontend-build:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+      - frontend-node-modules:/app/node_modules
+    command: sh -c "npm install && npm run build"
+
 volumes:
   ledger-data:
   cargo-registry:
   cargo-git:
   target-cache:
+  frontend-node-modules:

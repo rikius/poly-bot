@@ -82,6 +82,20 @@ pub struct Bot {
 }
 
 impl Bot {
+    /// Expose shared state for the API server.
+    ///
+    /// Call this *after* `Bot::new` but *before* `Bot::run` to obtain
+    /// Arc handles that the API server needs.
+    pub fn shared_state(
+        &self,
+    ) -> (Arc<crate::ledger::Ledger>, Arc<OrderBookState>, Arc<Config>) {
+        (
+            Arc::clone(&self.ledger),
+            Arc::clone(&self.order_book_state),
+            Arc::clone(&self.config),
+        )
+    }
+
     /// Create a new bot instance
     ///
     /// # Arguments

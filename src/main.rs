@@ -2,6 +2,7 @@
 //!
 //! High-frequency trading bot for Polymarket prediction markets.
 
+use polymarket_bot::api::{run_api_server, ApiState};
 use polymarket_bot::websocket::MarketDiscovery;
 use polymarket_bot::latency;
 use polymarket_bot::strategy::MarketPair;
@@ -190,8 +191,20 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Registered {} market pair(s) with {} token(s)", market_pairs.len(), token_ids.len());
 
-    // Create and run the bot
+    // Create the bot
     let mut bot = Bot::new(config, kill_switch.clone(), token_ids, market_pairs, &selected.url).await;
+
+    // Start API server (shares read-only views of bot state)
+    {
+        let (ledger, obs, cfg) = bot.shared_state();
+        let api_state = Arc::new(ApiState::new(ledger, obs, cfg));
+        let api_port = std::env::var("API_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(3001);
+        tokio::spawn(run_api_server(api_state, api_port));
+    }
+
     bot.run().await;
 
     // Graceful shutdown

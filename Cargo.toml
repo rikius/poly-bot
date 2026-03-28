@@ -55,6 +55,10 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 # Configuration
 dotenvy = "0.15"
 
+# Frontend API server (HTTP + WebSocket)
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["cors", "fs"] }
+
 
 [dev-dependencies]
 tokio-test = "0.4"
