@@ -501,6 +501,25 @@ impl OrderExecutor {
             }
         }
     }
+
+    /// Cancel all live orders via the exchange bulk-cancel endpoint.
+    ///
+    /// Called from the API server's `POST /api/orders/cancel-all` handler.
+    /// Returns the number of orders the exchange confirmed as cancelled.
+    pub async fn cancel_all_orders(&self) -> usize {
+        warn!("Cancelling all orders via API request");
+        match self.clob_client.cancel_all_orders().await {
+            Ok(response) => {
+                let count = response.canceled.len();
+                warn!(count = count, "All orders cancelled via API");
+                count
+            }
+            Err(e) => {
+                error!(error = %e, "Bulk cancel-all failed");
+                0
+            }
+        }
+    }
 }
 
 // ============================================================================

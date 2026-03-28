@@ -16,6 +16,7 @@
 //! - Async kill signal for shutdown
 
 use crate::alerts::AlertSender;
+use crate::api::ControlState;
 use crate::config::{Config, OperatingMode};
 use crate::execution::{DualPolicy, ExecutionResult, ExecutionStatus, OrderExecutor, OrderTracker};
 use crate::feeds::{new_price_store, ExternalPriceStore};
@@ -98,6 +99,8 @@ pub struct Bot {
     /// Tracks whether the circuit breaker was open at the last heartbeat, so
     /// we fire an alert exactly once on each Open transition.
     circuit_was_open: bool,
+    /// Mutable runtime controls shared with the API server (pause/resume, config).
+    controls: Arc<ControlState>,
 }
 
 impl Bot {
@@ -107,12 +110,21 @@ impl Bot {
     /// Arc handles that the API server needs.
     pub fn shared_state(
         &self,
-    ) -> (Arc<crate::ledger::Ledger>, Arc<OrderBookState>, Arc<Config>, Arc<BotLatency>) {
+    ) -> (
+        Arc<crate::ledger::Ledger>,
+        Arc<OrderBookState>,
+        Arc<Config>,
+        Arc<BotLatency>,
+        Arc<ControlState>,
+        Option<Arc<OrderExecutor>>,
+    ) {
         (
             Arc::clone(&self.ledger),
             Arc::clone(&self.order_book_state),
             Arc::clone(&self.config),
             Arc::clone(&self.latency),
+            Arc::clone(&self.controls),
+            self.executor.clone(),
         )
     }
 
@@ -220,6 +232,9 @@ impl Bot {
 
         // Shared latency histograms (threaded into executor as well)
         let latency = BotLatency::new();
+
+        // Build runtime controls (shared with API server for pause/resume/config)
+        let controls = ControlState::new(&config);
 
         // Build alert sender early so it can be shared with the executor
         let alerts = config.alert_sender();
@@ -335,6 +350,7 @@ impl Bot {
             _external_prices: external_prices,
             alerts,
             circuit_was_open: false,
+            controls,
         }
     }
 
@@ -711,6 +727,11 @@ impl Bot {
 
     /// Route a book update to strategies and process intents
     fn route_book_update(&mut self, market_id: &str, token_id: &str) {
+        // Honour API pause — drop all intents without touching the circuit breaker
+        if self.controls.is_paused() {
+            return;
+        }
+
         // Create strategy context
         let ctx = StrategyContext::new(&self.order_book_state, &self.ledger);
 

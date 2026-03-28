@@ -135,6 +135,12 @@ body {
   padding: 16px;
 }
 
+.section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
 .card-title {
   font-size: 13px;
   font-weight: 600;
@@ -337,4 +343,239 @@ body {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/* ---------- Controls panel ---------- */
+
+.controls-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow: hidden;
+  padding: 0; /* sections have their own padding */
+}
+
+.controls-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.controls-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.bot-status-badge {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 3px 10px;
+  border-radius: 20px;
+}
+
+.bot-status-badge.active {
+  background: rgba(63, 185, 80, 0.15);
+  color: var(--green);
+  border: 1px solid rgba(63, 185, 80, 0.4);
+}
+
+.bot-status-badge.paused {
+  background: rgba(248, 81, 73, 0.15);
+  color: var(--red);
+  border: 1px solid rgba(248, 81, 73, 0.4);
+}
+
+.controls-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.btn-toggle {
+  padding: 8px 18px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: opacity 0.15s;
+}
+
+.btn-toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-pause {
+  background: rgba(210, 153, 34, 0.15);
+  color: var(--yellow);
+  border: 1px solid rgba(210, 153, 34, 0.4);
+}
+
+.btn-pause:hover:not(:disabled) {
+  background: rgba(210, 153, 34, 0.25);
+}
+
+.btn-resume {
+  background: rgba(63, 185, 80, 0.15);
+  color: var(--green);
+  border: 1px solid rgba(63, 185, 80, 0.4);
+}
+
+.btn-resume:hover:not(:disabled) {
+  background: rgba(63, 185, 80, 0.25);
+}
+
+.btn-danger {
+  padding: 8px 18px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  background: rgba(248, 81, 73, 0.12);
+  color: var(--red);
+  border: 1px solid rgba(248, 81, 73, 0.35);
+  transition: background 0.15s;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: rgba(248, 81, 73, 0.25);
+}
+
+.btn-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cancel-result {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  padding: 6px 10px;
+  border-radius: 4px;
+}
+
+.cancel-result.ok {
+  color: var(--green);
+  background: rgba(63, 185, 80, 0.08);
+}
+
+.cancel-result.error {
+  color: var(--red);
+  background: rgba(248, 81, 73, 0.08);
+}
+
+/* ── Config form ── */
+
+.controls-body {
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.controls-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.config-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.config-group--check {
+  justify-content: flex-end;
+}
+
+.config-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  letter-spacing: 0.03em;
+}
+
+.config-group--check .config-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.config-group--check input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.config-input {
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 6px 10px;
+  width: 100%;
+  transition: border-color 0.15s;
+}
+
+.config-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* remove browser number-input spinner arrows */
+.config-input::-webkit-inner-spin-button,
+.config-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+}
+
+.config-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 4px;
+}
+
+.btn-save {
+  padding: 7px 20px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  background: rgba(88, 166, 255, 0.12);
+  color: var(--accent);
+  border: 1px solid rgba(88, 166, 255, 0.35);
+  transition: background 0.15s;
+}
+
+.btn-save:hover:not(:disabled) {
+  background: rgba(88, 166, 255, 0.22);
+}
+
+.btn-save:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.save-ok {
+  font-size: 12px;
+  color: var(--green);
 }

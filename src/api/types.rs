@@ -3,7 +3,7 @@
 //! These are separate from the internal bot types to keep the API contract
 //! stable and decouple serialization concerns from trading logic.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BotStatus {
@@ -113,6 +113,22 @@ pub struct LatencyInfo {
     pub submit_to_ack: LatencyPointInfo,
 }
 
+/// Runtime-configurable controls broadcast in every snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlsInfo {
+    /// Whether the bot is paused (no new intents generated)
+    pub trading_paused: bool,
+    pub max_bet_usd: String,
+    pub max_position_per_market_usd: String,
+    pub max_total_exposure_usd: String,
+    pub max_daily_loss_usd: String,
+    pub max_open_orders: u32,
+    pub use_maker_mode: bool,
+    pub temporal_arb_enabled: bool,
+    pub temporal_arb_threshold_bps: i64,
+    pub temporal_arb_sensitivity_bps: i64,
+}
+
 /// Full snapshot broadcast over WebSocket every 500ms
 #[derive(Debug, Clone, Serialize)]
 pub struct WsSnapshot {
@@ -127,4 +143,5 @@ pub struct WsSnapshot {
     pub recent_fills: Vec<FillInfo>,
     pub pnl: PnlInfo,
     pub latency: LatencyInfo,
+    pub controls: ControlsInfo,
 }

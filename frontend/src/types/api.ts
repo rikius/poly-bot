@@ -65,6 +65,19 @@ export interface OrderStatsInfo {
   active_count: number;
 }
 
+export interface ControlsInfo {
+  trading_paused: boolean;
+  max_bet_usd: string;
+  max_position_per_market_usd: string;
+  max_total_exposure_usd: string;
+  max_daily_loss_usd: string;
+  max_open_orders: number;
+  use_maker_mode: boolean;
+  temporal_arb_enabled: boolean;
+  temporal_arb_threshold_bps: number;
+  temporal_arb_sensitivity_bps: number;
+}
+
 export interface WsSnapshot {
   type: "snapshot";
   timestamp: string;
@@ -75,4 +88,5 @@ export interface WsSnapshot {
   order_stats: OrderStatsInfo;
   recent_fills: FillInfo[];
   pnl: PnlInfo;
+  controls: ControlsInfo;
 }

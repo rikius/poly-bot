@@ -1,18 +1,23 @@
 //! Axum HTTP + WebSocket server
 //!
 //! Serves:
-//! - GET  /api/status  — health check (JSON)
-//! - GET  /ws          — WebSocket endpoint; pushes WsSnapshot every 500ms
-//! - GET  /*           — static files from frontend/dist (production)
+//! - GET  /api/status          — health check (JSON)
+//! - POST /api/bot/pause       — pause strategy execution
+//! - POST /api/bot/resume      — resume strategy execution
+//! - POST /api/orders/cancel-all — cancel all live orders
+//! - PATCH /api/config         — update runtime strategy config
+//! - GET  /metrics             — Prometheus text exposition
+//! - GET  /ws                  — WebSocket; pushes WsSnapshot every 500ms
+//! - GET  /*                   — static files from frontend/dist (production)
 
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    http::header,
+    http::{header, StatusCode},
     response::IntoResponse,
-    routing::get,
+    routing::{get, patch, post},
     Json, Router,
 };
 use chrono::Utc;
@@ -23,7 +28,9 @@ use tokio::time::interval;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{debug, error, info, warn};
 
+use crate::api::controls::{ConfigPatch, ControlState};
 use crate::config::{Config, OperatingMode};
+use crate::execution::OrderExecutor;
 use crate::ledger::{orders::OrderState, positions::Fill, Ledger};
 use crate::metrics::{BotLatency, PrometheusHandle};
 use crate::state::OrderBookState;
@@ -40,6 +47,10 @@ pub struct ApiState {
     pub start_time: Instant,
     /// Prometheus recorder handle — rendered on each GET /metrics scrape.
     pub prometheus: PrometheusHandle,
+    /// Mutable runtime controls (pause/resume, config patch).
+    pub controls: Arc<ControlState>,
+    /// Live order executor — None in paper-mode without credentials.
+    pub executor: Option<Arc<OrderExecutor>>,
 }
 
 impl ApiState {
@@ -49,6 +60,8 @@ impl ApiState {
         config: Arc<Config>,
         latency: Arc<BotLatency>,
         prometheus: PrometheusHandle,
+        controls: Arc<ControlState>,
+        executor: Option<Arc<OrderExecutor>>,
     ) -> Self {
         Self {
             ledger,
@@ -57,6 +70,8 @@ impl ApiState {
             latency,
             start_time: Instant::now(),
             prometheus,
+            controls,
+            executor,
         }
     }
 
@@ -233,6 +248,22 @@ impl ApiState {
             },
         };
 
+        // Controls snapshot
+        let rc = self.controls.runtime_config.read().unwrap();
+        let controls = ControlsInfo {
+            trading_paused: self.controls.is_paused(),
+            max_bet_usd: rc.max_bet_usd.to_string(),
+            max_position_per_market_usd: rc.max_position_per_market_usd.to_string(),
+            max_total_exposure_usd: rc.max_total_exposure_usd.to_string(),
+            max_daily_loss_usd: rc.max_daily_loss_usd.to_string(),
+            max_open_orders: rc.max_open_orders,
+            use_maker_mode: rc.use_maker_mode,
+            temporal_arb_enabled: rc.temporal_arb_enabled,
+            temporal_arb_threshold_bps: rc.temporal_arb_threshold_bps,
+            temporal_arb_sensitivity_bps: rc.temporal_arb_sensitivity_bps,
+        };
+        drop(rc);
+
         WsSnapshot {
             msg_type: "snapshot".to_string(),
             timestamp: Utc::now().to_rfc3339(),
@@ -244,6 +275,7 @@ impl ApiState {
             recent_fills,
             pnl,
             latency,
+            controls,
         }
     }
 }
@@ -295,9 +327,6 @@ fn fill_to_info(f: &Fill) -> FillInfo {
 // ---------------------------------------------------------------------------
 
 /// GET /metrics — Prometheus text-format exposition
-///
-/// Updates all gauges from the current bot state on each scrape request so
-/// Prometheus always sees fresh values.
 async fn metrics_handler(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     state.update_prometheus_metrics();
     let body = state.prometheus.render();
@@ -307,6 +336,7 @@ async fn metrics_handler(State(state): State<Arc<ApiState>>) -> impl IntoRespons
     )
 }
 
+/// GET /api/status — health check
 async fn status_handler(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     let uptime = state.start_time.elapsed().as_secs();
     let mode = match state.config.mode {
@@ -318,9 +348,69 @@ async fn status_handler(State(state): State<Arc<ApiState>>) -> impl IntoResponse
         "mode": mode,
         "uptime_secs": uptime,
         "version": env!("CARGO_PKG_VERSION"),
+        "trading_paused": state.controls.is_paused(),
     }))
 }
 
+/// POST /api/bot/pause — stop generating new intents
+async fn pause_handler(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+    state.controls.pause();
+    warn!("Bot paused via API");
+    Json(json!({ "ok": true, "trading_paused": true }))
+}
+
+/// POST /api/bot/resume — resume generating intents
+async fn resume_handler(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+    state.controls.resume();
+    info!("Bot resumed via API");
+    Json(json!({ "ok": true, "trading_paused": false }))
+}
+
+/// POST /api/orders/cancel-all — cancel all live orders via exchange API
+async fn cancel_all_handler(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+    match &state.executor {
+        Some(executor) => {
+            let count = executor.cancel_all_orders().await;
+            warn!(cancelled = count, "Cancel-all triggered via API");
+            Json(json!({ "ok": true, "cancelled": count })).into_response()
+        }
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "ok": false, "error": "No executor (paper mode without credentials)" })),
+        )
+            .into_response(),
+    }
+}
+
+/// PATCH /api/config — update runtime strategy parameters
+async fn config_patch_handler(
+    State(state): State<Arc<ApiState>>,
+    Json(patch): Json<ConfigPatch>,
+) -> impl IntoResponse {
+    state.controls.apply_patch(patch);
+    let rc = state.controls.runtime_config.read().unwrap();
+    info!(
+        max_bet_usd = %rc.max_bet_usd,
+        temporal_arb_enabled = rc.temporal_arb_enabled,
+        "Runtime config updated via API"
+    );
+    Json(json!({
+        "ok": true,
+        "config": {
+            "max_bet_usd": rc.max_bet_usd.to_string(),
+            "max_position_per_market_usd": rc.max_position_per_market_usd.to_string(),
+            "max_total_exposure_usd": rc.max_total_exposure_usd.to_string(),
+            "max_daily_loss_usd": rc.max_daily_loss_usd.to_string(),
+            "max_open_orders": rc.max_open_orders,
+            "use_maker_mode": rc.use_maker_mode,
+            "temporal_arb_enabled": rc.temporal_arb_enabled,
+            "temporal_arb_threshold_bps": rc.temporal_arb_threshold_bps,
+            "temporal_arb_sensitivity_bps": rc.temporal_arb_sensitivity_bps,
+        }
+    }))
+}
+
+/// GET /ws — WebSocket upgrade
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<ApiState>>,
@@ -384,11 +474,14 @@ pub async fn run_api_server(state: Arc<ApiState>, port: u16) -> anyhow::Result<(
         .allow_methods(Any)
         .allow_headers(Any);
 
-    // Try to serve the built frontend from frontend/dist if it exists
     let static_dir = std::path::Path::new("frontend/dist");
 
     let app = Router::new()
         .route("/api/status", get(status_handler))
+        .route("/api/bot/pause", post(pause_handler))
+        .route("/api/bot/resume", post(resume_handler))
+        .route("/api/orders/cancel-all", post(cancel_all_handler))
+        .route("/api/config", patch(config_patch_handler))
         .route("/metrics", get(metrics_handler))
         .route("/ws", get(ws_handler))
         .with_state(state)
