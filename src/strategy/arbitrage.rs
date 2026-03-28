@@ -78,6 +78,18 @@ impl MathArbConfig {
     }
 }
 
+/// Round a price UP to the nearest multiple of tick_size.
+///
+/// Used for BUY limit prices: ensures our limit price meets or exceeds the ask
+/// so a FOK/FAK order will fill even when the raw book price has sub-tick precision.
+fn round_up_to_tick(price: Decimal, tick_size: Decimal) -> Decimal {
+    if tick_size.is_zero() {
+        return price;
+    }
+    let ticks = price / tick_size;
+    ticks.ceil() * tick_size
+}
+
 /// Mathematical arbitrage strategy
 ///
 /// Implements the Strategy trait. On each book update, checks if
@@ -186,18 +198,55 @@ impl MathArbStrategy {
             return None;
         }
 
-        // Quick check first
-        let (yes_ask, no_ask, edge) =
+        // Quick check first (uses raw book prices)
+        let (yes_ask_raw, no_ask_raw, edge) =
             self.edge_calculator
                 .quick_check(ctx.books, &pair.yes_token_id, &pair.no_token_id)?;
 
         debug!(
             market = %pair.condition_id,
-            yes_ask = %yes_ask,
-            no_ask = %no_ask,
+            yes_ask = %yes_ask_raw,
+            no_ask = %no_ask_raw,
             edge = %edge,
             "Arb opportunity detected (quick check)"
         );
+
+        // Round ask prices UP to the market tick size.
+        // The exchange rejects prices with more decimal places than the tick size allows
+        // (e.g. Polymarket may stream 0.18005 but only accepts multiples of 0.01).
+        // Rounding UP ensures our buy limit price still crosses the ask.
+        let yes_ask = round_up_to_tick(yes_ask_raw, pair.tick_size);
+        let no_ask = round_up_to_tick(no_ask_raw, pair.tick_size);
+
+        if yes_ask != yes_ask_raw || no_ask != no_ask_raw {
+            debug!(
+                market = %pair.condition_id,
+                yes_ask_raw = %yes_ask_raw, yes_ask_rounded = %yes_ask,
+                no_ask_raw = %no_ask_raw, no_ask_rounded = %no_ask,
+                tick_size = %pair.tick_size,
+                "Sub-tick prices rounded up to tick boundary"
+            );
+            // Re-check profitability with rounded prices — rounding up erodes edge
+            let combined_rounded = yes_ask + no_ask;
+            if combined_rounded >= Decimal::ONE {
+                debug!(
+                    market = %pair.condition_id,
+                    combined = %combined_rounded,
+                    "Not profitable after tick rounding (combined >= 1)"
+                );
+                return None;
+            }
+            let edge_after_round = Decimal::ONE - combined_rounded;
+            if edge_after_round < self.config.min_edge {
+                debug!(
+                    market = %pair.condition_id,
+                    edge = %edge_after_round,
+                    min_edge = %self.config.min_edge,
+                    "Edge insufficient after tick rounding"
+                );
+                return None;
+            }
+        }
 
         // Full edge calculation
         let calc = self.edge_calculator.calculate(
