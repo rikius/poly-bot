@@ -128,7 +128,6 @@ pub fn new_price_store() -> ExternalPriceStore {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
-    use std::time::Duration;
 
     #[test]
     fn test_record_new() {
