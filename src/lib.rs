@@ -20,6 +20,7 @@ pub mod execution;
 pub mod kill_switch;
 pub mod latency;
 pub mod ledger;
+pub mod metrics;
 pub mod risk;
 pub mod state;
 pub mod strategy;

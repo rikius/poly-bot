@@ -11,7 +11,7 @@
 
 use std::str::FromStr as _;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 use alloy_signer_local::PrivateKeySigner;
@@ -30,6 +30,7 @@ use rust_decimal::Decimal;
 use crate::constants::PARTIAL_FILL_UNWIND_MS;
 use crate::error::ErrorType;
 use crate::execution::policy::{ExecutionPolicy, IntentRef, OrderParams};
+use crate::metrics::BotLatency;
 use crate::risk::circuit_breaker::CircuitBreaker;
 use crate::risk::rate_limiter::RateLimiter;
 use crate::strategy::{OrderIntent, Urgency};
@@ -115,6 +116,9 @@ pub struct OrderExecutor {
 
     /// Rate limiter for order submission (POST /order)
     rate_limiter: RateLimiter,
+
+    /// Shared latency histograms
+    latency: Arc<BotLatency>,
 }
 
 impl OrderExecutor {
@@ -124,6 +128,7 @@ impl OrderExecutor {
         signer: Arc<PrivateKeySigner>,
         policy: Arc<dyn ExecutionPolicy>,
         circuit_breaker: Arc<CircuitBreaker>,
+        latency: Arc<BotLatency>,
     ) -> Self {
         Self {
             clob_client,
@@ -131,6 +136,7 @@ impl OrderExecutor {
             policy,
             circuit_breaker,
             rate_limiter: RateLimiter::for_order_submission(),
+            latency,
         }
     }
 
@@ -375,6 +381,8 @@ impl OrderExecutor {
             OrderType::FAK => SdkOrderType::FAK,
         };
 
+        let t0 = Instant::now();
+
         // Build order — SDK validates tick-size and lot-size automatically
         let signable = self
             .clob_client
@@ -392,6 +400,10 @@ impl OrderExecutor {
 
         // Submit
         let response = self.clob_client.post_order(signed).await?;
+
+        self.latency
+            .submit_to_ack
+            .record_us(t0.elapsed().as_micros() as u64);
 
         Ok(response)
     }

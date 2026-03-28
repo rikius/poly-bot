@@ -24,6 +24,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::{Config, OperatingMode};
 use crate::ledger::{orders::OrderState, positions::Fill, Ledger};
+use crate::metrics::BotLatency;
 use crate::state::OrderBookState;
 use crate::websocket::types::Side;
 
@@ -34,6 +35,7 @@ pub struct ApiState {
     pub ledger: Arc<Ledger>,
     pub order_book_state: Arc<OrderBookState>,
     pub config: Arc<Config>,
+    pub latency: Arc<BotLatency>,
     pub start_time: Instant,
 }
 
@@ -42,11 +44,13 @@ impl ApiState {
         ledger: Arc<Ledger>,
         order_book_state: Arc<OrderBookState>,
         config: Arc<Config>,
+        latency: Arc<BotLatency>,
     ) -> Self {
         Self {
             ledger,
             order_book_state,
             config,
+            latency,
             start_time: Instant::now(),
         }
     }
@@ -157,6 +161,24 @@ impl ApiState {
             net: net.to_string(),
         };
 
+        // Latency (rolling 60s histogram snapshot — values reset by heartbeat)
+        let book_stats = self.latency.book_to_intent.stats();
+        let submit_stats = self.latency.submit_to_ack.stats();
+        let latency = LatencyInfo {
+            book_to_intent: LatencyPointInfo {
+                p50_us: book_stats.p50_us,
+                p95_us: book_stats.p95_us,
+                p99_us: book_stats.p99_us,
+                count: book_stats.count,
+            },
+            submit_to_ack: LatencyPointInfo {
+                p50_us: submit_stats.p50_us,
+                p95_us: submit_stats.p95_us,
+                p99_us: submit_stats.p99_us,
+                count: submit_stats.count,
+            },
+        };
+
         WsSnapshot {
             msg_type: "snapshot".to_string(),
             timestamp: Utc::now().to_rfc3339(),
@@ -167,6 +189,7 @@ impl ApiState {
             order_stats,
             recent_fills,
             pnl,
+            latency,
         }
     }
 }

@@ -95,6 +95,24 @@ pub struct OrderStatsInfo {
     pub active_count: usize,
 }
 
+/// Latency percentiles for a single instrumented point.
+#[derive(Debug, Clone, Serialize)]
+pub struct LatencyPointInfo {
+    pub p50_us: u64,
+    pub p95_us: u64,
+    pub p99_us: u64,
+    pub count: u64,
+}
+
+/// Latency summary exposed over the API (rolling 60s window).
+#[derive(Debug, Clone, Serialize)]
+pub struct LatencyInfo {
+    /// Strategy evaluation: book update → intents returned (µs)
+    pub book_to_intent: LatencyPointInfo,
+    /// Order submission: build+sign+post_order → response (µs)
+    pub submit_to_ack: LatencyPointInfo,
+}
+
 /// Full snapshot broadcast over WebSocket every 500ms
 #[derive(Debug, Clone, Serialize)]
 pub struct WsSnapshot {
@@ -108,4 +126,5 @@ pub struct WsSnapshot {
     pub order_stats: OrderStatsInfo,
     pub recent_fills: Vec<FillInfo>,
     pub pnl: PnlInfo,
+    pub latency: LatencyInfo,
 }

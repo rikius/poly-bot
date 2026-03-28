@@ -19,6 +19,7 @@ use crate::config::{Config, OperatingMode};
 use crate::execution::{DualPolicy, ExecutionResult, ExecutionStatus, OrderExecutor, OrderTracker};
 use crate::kill_switch::KillSwitch;
 use crate::ledger::{Fill, Ledger};
+use crate::metrics::BotLatency;
 use crate::risk::CircuitBreaker;
 use crate::state::OrderBookState;
 use crate::strategy::{
@@ -82,6 +83,10 @@ pub struct Bot {
     total_executions: u64,
     /// Total fills received
     total_fills: u64,
+    /// Shared latency histograms (also passed to executor)
+    latency: Arc<BotLatency>,
+    /// Heartbeat tick counter — used to trigger periodic histogram reset (every 6 ticks = 60s)
+    heartbeat_count: u32,
 }
 
 impl Bot {
@@ -91,11 +96,12 @@ impl Bot {
     /// Arc handles that the API server needs.
     pub fn shared_state(
         &self,
-    ) -> (Arc<crate::ledger::Ledger>, Arc<OrderBookState>, Arc<Config>) {
+    ) -> (Arc<crate::ledger::Ledger>, Arc<OrderBookState>, Arc<Config>, Arc<BotLatency>) {
         (
             Arc::clone(&self.ledger),
             Arc::clone(&self.order_book_state),
             Arc::clone(&self.config),
+            Arc::clone(&self.latency),
         )
     }
 
@@ -150,6 +156,9 @@ impl Bot {
         // Set up order tracker for outstanding orders
         let order_tracker = Arc::new(OrderTracker::new());
 
+        // Shared latency histograms (threaded into executor as well)
+        let latency = BotLatency::new();
+
         // Authenticate and set up executor + user WS only if credentials are available
         let (executor, user_ws_rx, user_ws_task) = if config.has_credentials() {
             // Set up SDK signer + authenticated CLOB client
@@ -192,6 +201,7 @@ impl Bot {
                 signer,
                 policy,
                 circuit_breaker.clone(),
+                Arc::clone(&latency),
             ));
 
             // Set up User WebSocket for fill notifications
@@ -254,6 +264,8 @@ impl Bot {
             total_intents: 0,
             total_executions: 0,
             total_fills: 0,
+            latency,
+            heartbeat_count: 0,
         }
     }
 
@@ -426,7 +438,8 @@ impl Bot {
         }
     }
 
-    /// Log heartbeat with current stats
+    /// Log heartbeat with current stats (every 10s).
+    /// Latency histograms are logged and reset every 60s (every 6th heartbeat).
     fn log_heartbeat(&mut self) {
         let mode_str = match self.config.mode {
             OperatingMode::Paper => "PAPER",
@@ -437,23 +450,44 @@ impl Bot {
         } else {
             "🔴 OPEN"
         };
-        
+
         let active_orders = self.order_tracker.active_count();
-        
+
         info!(
             "Heartbeat [{}]: {} markets | {} msgs | {:.1} msg/s | {} intents | {} execs | {} fills | {} active | CB: {}",
             mode_str,
             self.order_book_state.num_markets(),
             self.total_messages,
-            self.total_messages as f64 / 10.0,  // msgs per second (over 10s window)
+            self.total_messages as f64 / 10.0,
             self.total_intents,
             self.total_executions,
             self.total_fills,
             active_orders,
             circuit_status
         );
-        // Reset counter for next interval
         self.total_messages = 0;
+
+        self.heartbeat_count += 1;
+        if self.heartbeat_count % 6 == 0 {
+            // Log latency summary every 60s then reset for the next window
+            let book = self.latency.book_to_intent.stats();
+            let submit = self.latency.submit_to_ack.stats();
+
+            if book.count > 0 {
+                info!(
+                    "Latency book→intent: p50={}µs p95={}µs p99={}µs (n={})",
+                    book.p50_us, book.p95_us, book.p99_us, book.count
+                );
+                self.latency.book_to_intent.reset();
+            }
+            if submit.count > 0 {
+                info!(
+                    "Latency submit→ack:  p50={}µs p95={}µs p99={}µs (n={})",
+                    submit.p50_us, submit.p95_us, submit.p99_us, submit.count
+                );
+                self.latency.submit_to_ack.reset();
+            }
+        }
     }
 
     /// Handle a full book snapshot message
@@ -498,12 +532,16 @@ impl Bot {
         // Create strategy context
         let ctx = StrategyContext::new(&self.order_book_state, &self.ledger);
 
-        // Route to strategies
+        // Time strategy evaluation (book update receipt → intents returned)
+        let t0 = Instant::now();
         let intents = self.strategy_router.on_book_update(
             &market_id.to_string(),
             &token_id.to_string(),
             &ctx,
         );
+        self.latency
+            .book_to_intent
+            .record_us(t0.elapsed().as_micros() as u64);
 
         // Process any generated intents
         if !intents.is_empty() {

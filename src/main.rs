@@ -196,8 +196,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Start API server (shares read-only views of bot state)
     {
-        let (ledger, obs, cfg) = bot.shared_state();
-        let api_state = Arc::new(ApiState::new(ledger, obs, cfg));
+        let (ledger, obs, cfg, latency) = bot.shared_state();
+        let api_state = Arc::new(ApiState::new(ledger, obs, cfg, latency));
         let api_port = std::env::var("API_PORT")
             .ok()
             .and_then(|v| v.parse::<u16>().ok())
