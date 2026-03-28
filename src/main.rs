@@ -3,6 +3,7 @@
 //! High-frequency trading bot for Polymarket prediction markets.
 
 use polymarket_bot::api::{run_api_server, ApiState};
+use polymarket_bot::metrics::install_prometheus;
 use polymarket_bot::websocket::MarketDiscovery;
 use polymarket_bot::latency;
 use polymarket_bot::strategy::MarketPair;
@@ -18,6 +19,9 @@ async fn main() -> anyhow::Result<()> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
+
+    // Install Prometheus metrics recorder (must happen before any metrics macros)
+    let prometheus_handle = install_prometheus();
 
     // Initialize logging
     tracing_subscriber::fmt()
@@ -197,7 +201,7 @@ async fn main() -> anyhow::Result<()> {
     // Start API server (shares read-only views of bot state)
     {
         let (ledger, obs, cfg, latency) = bot.shared_state();
-        let api_state = Arc::new(ApiState::new(ledger, obs, cfg, latency));
+        let api_state = Arc::new(ApiState::new(ledger, obs, cfg, latency, prometheus_handle));
         let api_port = std::env::var("API_PORT")
             .ok()
             .and_then(|v| v.parse::<u16>().ok())

@@ -66,6 +66,10 @@ hdrhistogram = "7"
 # v0.28 is already compiled by the SDK as a transitive dep (with rustls TLS)
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 
+# Prometheus metrics — exposes /metrics in text format for scraping
+metrics = "0.23"
+metrics-exporter-prometheus = { version = "0.15", default-features = false }
+
 
 [dev-dependencies]
 tokio-test = "0.4"

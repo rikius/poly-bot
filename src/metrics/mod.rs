@@ -1,6 +1,6 @@
-//! Latency instrumentation — HDR histograms for critical path timing.
+//! Metrics: HDR latency histograms and Prometheus integration.
 //!
-//! Three points are tracked end-to-end:
+//! ## Latency histograms
 //!
 //! 1. `book_to_intent` — time from receiving a market book update to the
 //!    strategy router returning order intents (strategy evaluation cost).
@@ -8,11 +8,26 @@
 //! 2. `submit_to_ack` — time from starting `build_sign_submit` to receiving
 //!    the exchange response (sign + HTTP POST cost).
 //!
-//! Histograms accumulate across the rolling window and are logged every 60 s
-//! (6 × 10 s heartbeats). The `log_and_reset()` method is called by the
-//! heartbeat handler.
+//! ## Prometheus
+//!
+//! Call `install_prometheus()` once at startup to install the global recorder.
+//! The returned `PrometheusHandle` is stored in `ApiState` and rendered by
+//! the `GET /metrics` handler on each scrape.
 
 use std::sync::{Arc, Mutex};
+
+pub use metrics_exporter_prometheus::PrometheusHandle;
+
+/// Install the Prometheus metrics recorder as the global `metrics` backend.
+///
+/// Must be called once before any `metrics::gauge!` / `metrics::counter!`
+/// macros are used.  Returns a handle whose `.render()` method produces the
+/// Prometheus text-format exposition.
+pub fn install_prometheus() -> PrometheusHandle {
+    metrics_exporter_prometheus::PrometheusBuilder::new()
+        .install_recorder()
+        .expect("failed to install Prometheus recorder")
+}
 
 use hdrhistogram::Histogram;
 

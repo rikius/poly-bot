@@ -10,6 +10,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
+    http::header,
     response::IntoResponse,
     routing::get,
     Json, Router,
@@ -24,7 +25,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::{Config, OperatingMode};
 use crate::ledger::{orders::OrderState, positions::Fill, Ledger};
-use crate::metrics::BotLatency;
+use crate::metrics::{BotLatency, PrometheusHandle};
 use crate::state::OrderBookState;
 use crate::websocket::types::Side;
 
@@ -37,6 +38,8 @@ pub struct ApiState {
     pub config: Arc<Config>,
     pub latency: Arc<BotLatency>,
     pub start_time: Instant,
+    /// Prometheus recorder handle — rendered on each GET /metrics scrape.
+    pub prometheus: PrometheusHandle,
 }
 
 impl ApiState {
@@ -45,6 +48,7 @@ impl ApiState {
         order_book_state: Arc<OrderBookState>,
         config: Arc<Config>,
         latency: Arc<BotLatency>,
+        prometheus: PrometheusHandle,
     ) -> Self {
         Self {
             ledger,
@@ -52,7 +56,57 @@ impl ApiState {
             config,
             latency,
             start_time: Instant::now(),
+            prometheus,
         }
+    }
+
+    /// Push current bot state into the `metrics` global registry so the next
+    /// Prometheus scrape reflects up-to-date values.
+    fn update_prometheus_metrics(&self) {
+        use metrics::gauge;
+
+        let uptime = self.start_time.elapsed().as_secs() as f64;
+        gauge!("polybot_uptime_seconds").set(uptime);
+
+        // Cash
+        let cash = self.ledger.cash.snapshot();
+        gauge!("polybot_cash_available_usd").set(decimal_to_f64(cash.available));
+        gauge!("polybot_cash_reserved_usd").set(decimal_to_f64(cash.reserved));
+
+        // Order stats
+        let stats = self.ledger.orders.stats();
+        gauge!("polybot_orders_active").set(stats.active_count as f64);
+        gauge!("polybot_orders_filled_total").set(stats.total_filled as f64);
+        gauge!("polybot_orders_cancelled_total").set(stats.total_cancelled as f64);
+        gauge!("polybot_orders_rejected_total").set(stats.total_rejected as f64);
+
+        // Positions
+        let pos_count = self.ledger.positions.all_positions().len() as f64;
+        gauge!("polybot_positions_count").set(pos_count);
+
+        // PnL
+        let realized = decimal_to_f64(self.ledger.positions.total_realized_pnl());
+        let unrealized = decimal_to_f64(self.ledger.positions.total_unrealized_pnl());
+        let fees = decimal_to_f64(self.ledger.positions.total_fees());
+        let slippage = decimal_to_f64(self.ledger.positions.total_slippage_cost());
+        gauge!("polybot_pnl_realized_usd").set(realized);
+        gauge!("polybot_pnl_unrealized_usd").set(unrealized);
+        gauge!("polybot_pnl_fees_usd").set(fees);
+        gauge!("polybot_pnl_slippage_usd").set(slippage);
+        gauge!("polybot_pnl_net_usd").set(realized + unrealized - fees - slippage);
+
+        // Latency histograms
+        let b = self.latency.book_to_intent.stats();
+        gauge!("polybot_latency_book_to_intent_p50_us").set(b.p50_us as f64);
+        gauge!("polybot_latency_book_to_intent_p95_us").set(b.p95_us as f64);
+        gauge!("polybot_latency_book_to_intent_p99_us").set(b.p99_us as f64);
+        gauge!("polybot_latency_book_to_intent_count").set(b.count as f64);
+
+        let s = self.latency.submit_to_ack.stats();
+        gauge!("polybot_latency_submit_to_ack_p50_us").set(s.p50_us as f64);
+        gauge!("polybot_latency_submit_to_ack_p95_us").set(s.p95_us as f64);
+        gauge!("polybot_latency_submit_to_ack_p99_us").set(s.p99_us as f64);
+        gauge!("polybot_latency_submit_to_ack_count").set(s.count as f64);
     }
 
     fn build_snapshot(&self) -> WsSnapshot {
@@ -194,6 +248,10 @@ impl ApiState {
     }
 }
 
+fn decimal_to_f64(d: rust_decimal::Decimal) -> f64 {
+    d.to_string().parse::<f64>().unwrap_or(0.0)
+}
+
 fn order_state_str(s: &OrderState) -> String {
     match s {
         OrderState::CreatedLocal => "created",
@@ -235,6 +293,19 @@ fn fill_to_info(f: &Fill) -> FillInfo {
 // ---------------------------------------------------------------------------
 // Route handlers
 // ---------------------------------------------------------------------------
+
+/// GET /metrics — Prometheus text-format exposition
+///
+/// Updates all gauges from the current bot state on each scrape request so
+/// Prometheus always sees fresh values.
+async fn metrics_handler(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+    state.update_prometheus_metrics();
+    let body = state.prometheus.render();
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        body,
+    )
+}
 
 async fn status_handler(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     let uptime = state.start_time.elapsed().as_secs();
@@ -318,6 +389,7 @@ pub async fn run_api_server(state: Arc<ApiState>, port: u16) {
 
     let app = Router::new()
         .route("/api/status", get(status_handler))
+        .route("/metrics", get(metrics_handler))
         .route("/ws", get(ws_handler))
         .with_state(state)
         .layer(cors);
@@ -335,7 +407,8 @@ pub async fn run_api_server(state: Arc<ApiState>, port: u16) {
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     info!("API server listening on http://0.0.0.0:{}", port);
-    info!("  WebSocket: ws://0.0.0.0:{}/ws", port);
+    info!("  WebSocket:  ws://0.0.0.0:{}/ws", port);
+    info!("  Metrics:    http://0.0.0.0:{}/metrics", port);
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
