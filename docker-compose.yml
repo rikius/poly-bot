@@ -1,0 +1,70 @@
+services:
+
+  # ---------------------------------------------------------------------------
+  # dev — Rust toolchain with source mounted; use for cargo commands
+  #
+  #   docker compose run --rm dev              # cargo build (default)
+  #   docker compose run --rm dev cargo test
+  #   docker compose run --rm dev cargo check
+  #   docker compose run --rm dev cargo clippy
+  #   docker compose run --rm dev cargo build --release
+  # ---------------------------------------------------------------------------
+  dev:
+    build:
+      context: .
+      target: dev
+    working_dir: /build
+    volumes:
+      - .:/build                               # live source — edits reflected immediately
+      - cargo-registry:/usr/local/cargo/registry  # cache downloaded crates
+      - cargo-git:/usr/local/cargo/git
+      - target-cache:/build/target             # cache compiled artifacts
+    command: cargo build
+    environment:
+      - RUST_LOG=info
+      - CARGO_TERM_COLOR=always
+
+  # ---------------------------------------------------------------------------
+  # test — same as dev but runs cargo test by default
+  # ---------------------------------------------------------------------------
+  test:
+    build:
+      context: .
+      target: dev
+    working_dir: /build
+    volumes:
+      - .:/build
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target-cache:/build/target
+    command: cargo test
+    environment:
+      - RUST_LOG=info
+      - CARGO_TERM_COLOR=always
+
+  # ---------------------------------------------------------------------------
+  # bot — production image; runs the trading bot
+  #
+  #   docker compose up bot                    # start bot (paper mode)
+  #   docker compose logs -f bot               # tail logs
+  #   docker exec $(docker compose ps -q bot) touch /tmp/polybot_kill
+  # ---------------------------------------------------------------------------
+  bot:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ledger-data:/app/data
+    environment:
+      - RUST_LOG=info
+      - RUST_BACKTRACE=full
+    tmpfs:
+      - /tmp
+
+volumes:
+  ledger-data:
+  cargo-registry:
+  cargo-git:
+  target-cache:

@@ -4,7 +4,7 @@
 //! This separation allows the same strategy to run as taker or maker
 //! by simply changing the policy.
 
-use crate::api::types::OrderType;
+use crate::websocket::types::OrderType;
 use crate::strategy::Urgency;
 use rust_decimal::Decimal;
 
@@ -41,7 +41,7 @@ pub struct OrderParams {
     pub token_id: String,
 
     /// Buy or sell
-    pub side: crate::api::types::Side,
+    pub side: crate::websocket::types::Side,
 
     /// Limit price
     pub price: Decimal,
@@ -93,7 +93,7 @@ pub trait ExecutionPolicy: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct IntentRef {
     pub token_id: String,
-    pub side: crate::api::types::Side,
+    pub side: crate::websocket::types::Side,
     pub price: Decimal,
     pub size: Decimal,
     pub urgency: Urgency,
@@ -266,8 +266,8 @@ impl MakerPolicy {
     }
 
     /// Apply price offset to intent price
-    fn apply_price_offset(&self, price: Decimal, side: crate::api::types::Side) -> Decimal {
-        use crate::api::types::Side;
+    fn apply_price_offset(&self, price: Decimal, side: crate::websocket::types::Side) -> Decimal {
+        use crate::websocket::types::Side;
 
         if self.price_offset_cents == Decimal::ZERO {
             return price;
@@ -403,7 +403,7 @@ impl ExecutionPolicy for DualPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::types::Side;
+    use crate::websocket::types::Side;
     use rust_decimal_macros::dec;
 
     fn test_intent(urgency: Urgency, group_id: Option<String>) -> IntentRef {

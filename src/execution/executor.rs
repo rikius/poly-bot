@@ -3,20 +3,32 @@
 //! The executor is the bridge between strategy decisions (OrderIntent)
 //! and actual order submission. It:
 //! 1. Applies ExecutionPolicy to convert intent → OrderParams
-//! 2. Signs orders using the OrderSigner
-//! 3. Submits orders to the exchange
-//! 4. Handles partial fills per policy rules
-//! 5. Tracks execution results
+//! 2. Builds orders using the SDK OrderBuilder (cryptographic salt, tick-size validation)
+//! 3. Signs orders via EIP-712 (neg-risk auto-detected by SDK)
+//! 4. Submits orders to the exchange
+//! 5. Handles partial fills per policy rules
+//! 6. Tracks execution results
 
+use std::str::FromStr as _;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
-use crate::api::types::{OrderRequest, OrderResponse, OrderType};
-use crate::api::ApiClient;
+use alloy_signer_local::PrivateKeySigner;
+use polymarket_client_sdk::auth::Normal;
+use polymarket_client_sdk::auth::state::Authenticated;
+use polymarket_client_sdk::clob::Client as ClobClient;
+use polymarket_client_sdk::clob::types::{
+    OrderType as SdkOrderType,
+    Side as SdkSide,
+};
+use polymarket_client_sdk::clob::types::response::PostOrderResponse;
+use polymarket_client_sdk::types::U256;
+
+use crate::websocket::types::OrderType;
 use crate::error::ErrorType;
 use crate::execution::policy::{ExecutionPolicy, IntentRef, OrderParams, PartialFillAction};
 use crate::risk::circuit_breaker::CircuitBreaker;
-use crate::signing::{Order, OrderBuilder, OrderSigner};
+use crate::risk::rate_limiter::RateLimiter;
 use crate::strategy::OrderIntent;
 use rust_decimal::Decimal;
 
@@ -80,12 +92,17 @@ pub enum ExecutionStatus {
 // ============================================================================
 
 /// Executes order intents by converting them to orders and submitting
+///
+/// Uses the `polymarket-client-sdk` to:
+/// - Build orders with cryptographically random salt (not timestamp-derived)
+/// - Auto-detect neg-risk markets (no manual `is_neg_risk` flag)
+/// - Sign via EIP-712 with the correct exchange contract per chain
 pub struct OrderExecutor {
-    /// API client for order submission
-    client: Arc<ApiClient>,
+    /// SDK CLOB client (authenticated, Clone-cheap via inner Arc)
+    clob_client: ClobClient<Authenticated<Normal>>,
 
-    /// Order signer for EIP-712 signatures
-    signer: Arc<OrderSigner>,
+    /// EIP-712 signer (private key)
+    signer: Arc<PrivateKeySigner>,
 
     /// Execution policy (determines order type, partial fill handling)
     policy: Arc<dyn ExecutionPolicy>,
@@ -93,30 +110,24 @@ pub struct OrderExecutor {
     /// Circuit breaker to check before submission
     circuit_breaker: Arc<CircuitBreaker>,
 
-    /// Maker address (proxy wallet)
-    maker_address: String,
-
-    /// Whether this is a neg-risk market (affects signing)
-    is_neg_risk: bool,
+    /// Rate limiter for order submission (POST /order)
+    rate_limiter: RateLimiter,
 }
 
 impl OrderExecutor {
     /// Create a new order executor
     pub fn new(
-        client: Arc<ApiClient>,
-        signer: Arc<OrderSigner>,
+        clob_client: ClobClient<Authenticated<Normal>>,
+        signer: Arc<PrivateKeySigner>,
         policy: Arc<dyn ExecutionPolicy>,
         circuit_breaker: Arc<CircuitBreaker>,
-        maker_address: String,
-        is_neg_risk: bool,
     ) -> Self {
         Self {
-            client,
+            clob_client,
             signer,
             policy,
             circuit_breaker,
-            maker_address,
-            is_neg_risk,
+            rate_limiter: RateLimiter::for_order_submission(),
         }
     }
 
@@ -140,6 +151,25 @@ impl OrderExecutor {
             };
         }
 
+        // Check rate limiter
+        if !self.rate_limiter.try_acquire() {
+            warn!(
+                strategy = %intent.strategy_name,
+                token = %intent.token_id,
+                stats = %self.rate_limiter.stats(),
+                "Rate limit reached, rejecting order"
+            );
+            return ExecutionResult {
+                intent_token_id: intent.token_id.clone(),
+                order_id: None,
+                filled: false,
+                filled_size: Decimal::ZERO,
+                requested_size: intent.size,
+                status: ExecutionStatus::SubmissionFailed,
+                error: Some("Rate limit exceeded".to_string()),
+            };
+        }
+
         // Convert intent to order params using policy
         let intent_ref = IntentRef::from_intent(intent);
         let params = self.policy.to_order_params(&intent_ref);
@@ -154,38 +184,11 @@ impl OrderExecutor {
             "Executing order"
         );
 
-        // Build and sign the order
-        let order = self.build_order(&params);
-        let signed_order = match self.sign_order(&order).await {
-            Ok(signed) => signed,
-            Err(e) => {
-                error!(error = %e, "Failed to sign order");
-                return ExecutionResult {
-                    intent_token_id: intent.token_id.clone(),
-                    order_id: None,
-                    filled: false,
-                    filled_size: Decimal::ZERO,
-                    requested_size: intent.size,
-                    status: ExecutionStatus::SubmissionFailed,
-                    error: Some(format!("Signing failed: {}", e)),
-                };
-            }
-        };
-
-        // Create order request
-        let request = OrderRequest {
-            defer_exec: false,
-            order: signed_order,
-            owner: self.maker_address.clone(),
-            order_type: params.order_type,
-        };
-
-        // Submit order
-        match self.client.place_order(&request).await {
+        // Build → sign → submit via SDK
+        match self.build_sign_submit(&params).await {
             Ok(response) => self.process_response(&params, response),
             Err(e) => {
                 error!(error = %e, "Order submission failed");
-                // Record failure for circuit breaker (treat network errors as retryable)
                 self.circuit_breaker
                     .record_order_result(Some(ErrorType::Retryable));
                 ExecutionResult {
@@ -224,7 +227,6 @@ impl OrderExecutor {
             }
             _ => {
                 // For larger batches, execute sequentially
-                // (Could use futures_util::future::join_all for parallel if needed)
                 let mut results = Vec::with_capacity(intents.len());
                 for intent in intents {
                     results.push(self.execute(intent).await);
@@ -296,42 +298,55 @@ impl OrderExecutor {
         results
     }
 
-    /// Build an order from params
-    fn build_order(&self, params: &OrderParams) -> Order {
-        let signer_address = self.signer.address();
-
-        OrderBuilder::new(
-            self.maker_address.clone(),
-            signer_address,
-            params.token_id.clone(),
-            params.side,
-        )
-        .with_price_size(params.price, params.size)
-        .with_expiration(params.expiration)
-        .build()
-    }
-
-    /// Sign an order (handles neg-risk vs standard)
-    async fn sign_order(
+    /// Build, sign, and submit an order via the SDK
+    ///
+    /// The SDK handles:
+    /// - Cryptographic salt generation (random u64, not timestamp-based)
+    /// - Tick-size validation (fetches and caches per-market tick size)
+    /// - Neg-risk auto-detection (fetches and caches per-token)
+    /// - EIP-712 domain separator with correct exchange contract
+    async fn build_sign_submit(
         &self,
-        order: &Order,
-    ) -> Result<crate::api::types::SignedOrder, crate::error::BotError> {
-        if self.is_neg_risk {
-            self.signer.sign_order_neg_risk(order).await
-        } else {
-            self.signer.sign_order(order).await
-        }
+        params: &OrderParams,
+    ) -> std::result::Result<PostOrderResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let sdk_token_id = U256::from_str(&params.token_id)?;
+
+        let sdk_side = match params.side {
+            crate::websocket::types::Side::Buy => SdkSide::Buy,
+            crate::websocket::types::Side::Sell => SdkSide::Sell,
+        };
+
+        let sdk_order_type = match params.order_type {
+            OrderType::GTC => SdkOrderType::GTC,
+            OrderType::FOK => SdkOrderType::FOK,
+            OrderType::FAK => SdkOrderType::FAK,
+        };
+
+        // Build order — SDK validates tick-size and lot-size automatically
+        let signable = self
+            .clob_client
+            .limit_order()
+            .token_id(sdk_token_id)
+            .side(sdk_side)
+            .price(params.price)
+            .size(params.size)
+            .order_type(sdk_order_type)
+            .build()
+            .await?;
+
+        // Sign — SDK auto-detects neg-risk and picks the right exchange contract
+        let signed = self.clob_client.sign(self.signer.as_ref(), signable).await?;
+
+        // Submit
+        let response = self.clob_client.post_order(signed).await?;
+
+        Ok(response)
     }
 
     /// Process order response into execution result
-    fn process_response(&self, params: &OrderParams, response: OrderResponse) -> ExecutionResult {
+    fn process_response(&self, params: &OrderParams, response: PostOrderResponse) -> ExecutionResult {
         if response.success {
-            // Parse filled amount if available
-            let filled_size = response
-                .taking_amount
-                .parse::<Decimal>()
-                .unwrap_or(Decimal::ZERO);
-
+            let filled_size = response.taking_amount;
             let filled = filled_size > Decimal::ZERO;
 
             let status = if filled_size >= params.size {
@@ -365,14 +380,16 @@ impl OrderExecutor {
                 error: None,
             }
         } else {
+            let error_msg = response.error_msg.unwrap_or_default();
+
             warn!(
-                error = %response.error_msg,
+                error = %error_msg,
                 token = %params.token_id,
                 "Order rejected"
             );
 
             // Classify error and record for circuit breaker
-            let error_type = ErrorType::from_error_msg(&response.error_msg);
+            let error_type = ErrorType::from_error_msg(&error_msg);
             self.circuit_breaker.record_order_result(Some(error_type));
 
             ExecutionResult {
@@ -382,7 +399,7 @@ impl OrderExecutor {
                 filled_size: Decimal::ZERO,
                 requested_size: params.size,
                 status: ExecutionStatus::Rejected,
-                error: Some(response.error_msg),
+                error: Some(error_msg),
             }
         }
     }

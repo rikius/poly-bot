@@ -2,7 +2,7 @@
 //!
 //! Maintains best bid/ask and full book depth for all subscribed markets
 
-use crate::api::types::{PriceLevel, TokenId};
+use crate::websocket::types::{PriceLevel, TokenId};
 use dashmap::DashMap;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;

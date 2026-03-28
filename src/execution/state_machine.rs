@@ -113,7 +113,7 @@ pub enum Discrepancy {
 mod tests {
     use super::*;
     use crate::ledger::TrackedOrder;
-    use crate::api::types::Side;
+    use crate::websocket::types::Side;
     use rust_decimal_macros::dec;
 
     #[test]

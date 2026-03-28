@@ -7,8 +7,10 @@
 
 pub mod circuit_breaker;
 pub mod limits;
+pub mod rate_limiter;
 pub mod reconciliation;
 
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerStats, CircuitState, OpenReason};
 pub use limits::{LimitViolation, RiskLimits, RiskLimitsConfig, RiskLimitsStats};
+pub use rate_limiter::RateLimiter;
 pub use reconciliation::{ReconciliationLoop, ReconciliationMessage, ReconciliationResult};

@@ -15,25 +15,29 @@
 //! - Heartbeat for logging (10s)
 //! - Async kill signal for shutdown
 
-use crate::api::ApiClient;
 use crate::config::{Config, OperatingMode};
 use crate::execution::{DualPolicy, ExecutionResult, ExecutionStatus, OrderExecutor, OrderTracker};
 use crate::kill_switch::KillSwitch;
 use crate::ledger::Ledger;
 use crate::risk::CircuitBreaker;
-use crate::signing::OrderSigner;
 use crate::state::OrderBookState;
 use crate::strategy::{
     MarketPair, MarketPairRegistry, MathArbStrategy, OrderIntent, StrategyContext, StrategyRouter,
 };
 use crate::websocket::{MarketMessage, MarketWebSocket, UserMessage, UserWebSocket};
+use alloy_signer_local::PrivateKeySigner;
+use polymarket_client_sdk::auth::{Credentials, Signer as _};
+use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
+use polymarket_client_sdk::POLYGON;
 use std::collections::HashMap;
+use std::str::FromStr as _;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 /// Main bot struct that orchestrates all components
 pub struct Bot {
@@ -51,18 +55,18 @@ pub struct Bot {
     strategy_router: Arc<StrategyRouter>,
     /// Circuit breaker for risk management
     circuit_breaker: Arc<CircuitBreaker>,
-    /// Order executor for submitting trades
-    executor: Arc<OrderExecutor>,
+    /// Order executor for submitting trades (None in paper mode without credentials)
+    executor: Option<Arc<OrderExecutor>>,
     /// Order tracker for outstanding GTC orders
     order_tracker: Arc<OrderTracker>,
     /// Market WebSocket message receiver
     market_ws_rx: mpsc::UnboundedReceiver<MarketMessage>,
     /// Market WebSocket task handle
     market_ws_task: JoinHandle<()>,
-    /// User WebSocket message receiver
-    user_ws_rx: mpsc::UnboundedReceiver<UserMessage>,
-    /// User WebSocket task handle
-    user_ws_task: JoinHandle<()>,
+    /// User WebSocket message receiver (None in paper mode without credentials)
+    user_ws_rx: Option<mpsc::UnboundedReceiver<UserMessage>>,
+    /// User WebSocket task handle (None in paper mode without credentials)
+    user_ws_task: Option<JoinHandle<()>>,
     /// Last log time per token (for rate limiting)
     last_log_time: HashMap<String, Instant>,
     /// Message counter per token
@@ -90,10 +94,16 @@ impl Bot {
         kill_switch: Arc<KillSwitch>,
         token_ids: Vec<String>,
         market_pairs: Vec<MarketPair>,
+        clob_url: &str,
     ) -> Self {
         let config = Arc::new(config);
         let order_book_state = Arc::new(OrderBookState::new());
         let ledger = Arc::new(Ledger::new(config.max_bet_usd));
+
+        // Collect condition IDs before consuming market_pairs
+        let condition_ids: Vec<String> = market_pairs.iter()
+            .map(|p| p.condition_id.clone())
+            .collect();
 
         // Set up market pair registry
         let market_registry = Arc::new(MarketPairRegistry::new());
@@ -120,50 +130,77 @@ impl Bot {
         // Set up circuit breaker for risk management
         let circuit_breaker = Arc::new(CircuitBreaker::new());
 
-        // Set up order executor
-        let credentials = crate::api::ApiCredentials::new(
-            config.api_key.clone(),
-            config.secret_key.clone(),
-            config.passphrase.clone(),
-            config.wallet_address.clone(),
-        );
-        
-        let api_client = Arc::new(
-            ApiClient::new(credentials)
-                .expect("Failed to create API client")
-        );
-        
-        let order_signer = Arc::new(
-            OrderSigner::new(&config.private_key)
-                .expect("Failed to create order signer")
-        );
-        
-        // Use DualPolicy: Taker for Immediate/Normal, Maker for Passive
-        // Maker orders post inside spread for better fill probability
-        let policy = Arc::new(
-            DualPolicy::new()
-                .with_maker_offset(config.maker_price_offset)
-        );
-        
-        info!(
-            "Execution policy: DualPolicy (Taker=FOK/FAK, Maker=GTC offset={} cents)",
-            config.maker_price_offset
-        );
-        
-        // Note: 15-min crypto markets use neg-risk exchange
-        let executor = Arc::new(OrderExecutor::new(
-            api_client,
-            order_signer,
-            policy,
-            circuit_breaker.clone(),
-            config.wallet_address.clone(),
-            true, // is_neg_risk for 15-min crypto markets
-        ));
-
         // Set up order tracker for outstanding orders
         let order_tracker = Arc::new(OrderTracker::new());
 
-        // Set up Market WebSocket for order book data
+        // Authenticate and set up executor + user WS only if credentials are available
+        let (executor, user_ws_rx, user_ws_task) = if config.has_credentials() {
+            // Set up SDK signer + authenticated CLOB client
+            let signer = Arc::new(
+                PrivateKeySigner::from_str(config.private_key.as_ref().unwrap())
+                    .expect("Invalid private key")
+                    .with_chain_id(Some(POLYGON)),
+            );
+
+            let api_key = Uuid::parse_str(config.api_key.as_ref().unwrap())
+                .expect("POLYMARKET_API_KEY must be a valid UUID");
+            let sdk_credentials = Credentials::new(
+                api_key,
+                config.secret_key.clone().unwrap(),
+                config.passphrase.clone().unwrap(),
+            );
+
+            let clob_client = ClobClient::new(clob_url, ClobConfig::default())
+                .expect("Failed to create CLOB client")
+                .authentication_builder(signer.as_ref())
+                .credentials(sdk_credentials.clone())
+                .authenticate()
+                .await
+                .expect("Failed to authenticate CLOB client");
+
+            // Use DualPolicy: Taker for Immediate/Normal, Maker for Passive
+            let policy = Arc::new(
+                DualPolicy::new()
+                    .with_maker_offset(config.maker_price_offset)
+            );
+
+            info!(
+                "Execution policy: DualPolicy (Taker=FOK/FAK, Maker=GTC offset={} cents)",
+                config.maker_price_offset
+            );
+
+            // SDK auto-detects neg-risk per token — no manual flag needed
+            let executor = Arc::new(OrderExecutor::new(
+                clob_client.clone(),
+                signer,
+                policy,
+                circuit_breaker.clone(),
+            ));
+
+            // Set up User WebSocket for fill notifications
+            let wallet_address = config.wallet_address.as_ref().unwrap().parse()
+                .expect("WALLET_ADDRESS must be a valid Ethereum address");
+            let (user_ws_tx, user_ws_rx) = mpsc::unbounded_channel();
+            let user_ws = Arc::new(UserWebSocket::new(
+                sdk_credentials,
+                wallet_address,
+                condition_ids,
+                user_ws_tx,
+            ));
+
+            // Spawn User WebSocket task
+            let user_ws_clone = user_ws.clone();
+            let user_ws_task = tokio::spawn(async move {
+                user_ws_clone.run().await;
+            });
+
+            (Some(executor), Some(user_ws_rx), Some(user_ws_task))
+        } else {
+            info!("Paper mode without credentials — no executor or user WebSocket");
+            (None, None, None)
+        };
+
+        // Set up Market WebSocket for order book data (always needed)
         let (market_ws_tx, market_ws_rx) = mpsc::unbounded_channel();
         let market_ws = Arc::new(MarketWebSocket::new(token_ids.clone(), market_ws_tx));
 
@@ -171,21 +208,6 @@ impl Bot {
         let market_ws_clone = market_ws.clone();
         let market_ws_task = tokio::spawn(async move {
             market_ws_clone.run().await;
-        });
-
-        // Set up User WebSocket for fill notifications
-        let (user_ws_tx, user_ws_rx) = mpsc::unbounded_channel();
-        let user_ws = Arc::new(UserWebSocket::new(
-            config.api_key.clone(),
-            config.secret_key.clone(),
-            config.passphrase.clone(),
-            user_ws_tx,
-        ));
-
-        // Spawn User WebSocket task
-        let user_ws_clone = user_ws.clone();
-        let user_ws_task = tokio::spawn(async move {
-            user_ws_clone.run().await;
         });
 
         info!(
@@ -245,8 +267,13 @@ impl Bot {
                     self.handle_market_message(msg).await;
                 }
 
-                // User WebSocket messages - fill notifications
-                Some(msg) = self.user_ws_rx.recv() => {
+                // User WebSocket messages - fill notifications (when authenticated)
+                Some(msg) = async {
+                    match self.user_ws_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
                     self.handle_user_message(msg).await;
                 }
 
@@ -514,15 +541,19 @@ impl Bot {
                 }
             }
             OperatingMode::Live => {
+                let Some(ref executor) = self.executor else {
+                    error!("Live mode but no executor configured — missing credentials?");
+                    return;
+                };
                 // Spawn execution as background task to not block event loop
-                let executor = self.executor.clone();
+                let executor = executor.clone();
                 let circuit_breaker = self.circuit_breaker.clone();
                 let intents_owned = intents.clone();
-                
+
                 tokio::spawn(async move {
                     Self::execute_intents(executor, circuit_breaker, intents_owned).await;
                 });
-                
+
                 self.total_executions += intents.len() as u64;
             }
         }
@@ -687,7 +718,9 @@ impl Bot {
 
         // Abort WebSocket tasks
         self.market_ws_task.abort();
-        self.user_ws_task.abort();
+        if let Some(ref task) = self.user_ws_task {
+            task.abort();
+        }
 
         // Log order tracker status
         self.order_tracker.log_status();

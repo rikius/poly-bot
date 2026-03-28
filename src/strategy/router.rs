@@ -3,7 +3,7 @@
 //! Routes book updates, fills, and tick events to the appropriate strategies.
 //! Handles conflict resolution when multiple strategies want to trade the same market.
 
-use crate::api::types::{ConditionId, TokenId};
+use crate::websocket::types::{ConditionId, TokenId};
 use crate::ledger::Fill;
 use crate::strategy::traits::{OrderIntent, Strategy, StrategyContext};
 use std::collections::{HashMap, HashSet};
@@ -311,7 +311,7 @@ impl std::error::Error for RouterError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::types::Side;
+    use crate::websocket::types::Side;
     use crate::ledger::Ledger;
     use crate::state::OrderBookState;
     use rust_decimal_macros::dec;

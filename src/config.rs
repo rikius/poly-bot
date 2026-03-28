@@ -7,12 +7,12 @@ use std::str::FromStr;
 /// Bot configuration loaded from environment
 #[derive(Debug, Clone)]
 pub struct Config {
-    // API credentials
-    pub api_key: String,
-    pub secret_key: String,
-    pub passphrase: String,
-    pub private_key: String,
-    pub wallet_address: String,
+    // API credentials (optional in Paper mode)
+    pub api_key: Option<String>,
+    pub secret_key: Option<String>,
+    pub passphrase: Option<String>,
+    pub private_key: Option<String>,
+    pub wallet_address: Option<String>,
 
     // Operating mode
     pub mode: OperatingMode,
@@ -51,31 +51,41 @@ impl Config {
         // Load .env file if it exists
         dotenvy::dotenv().ok();
 
-        let api_key = std::env::var("POLYMARKET_API_KEY")
-            .or_else(|_| std::env::var("api_key"))
-            .map_err(|_| BotError::Config("Missing POLYMARKET_API_KEY or api_key".into()))?;
-
-        let secret_key = std::env::var("POLYMARKET_SECRET")
-            .or_else(|_| std::env::var("secret_key"))
-            .map_err(|_| BotError::Config("Missing POLYMARKET_SECRET or secret_key".into()))?;
-
-        let passphrase = std::env::var("POLYMARKET_PASSPHRASE")
-            .or_else(|_| std::env::var("passphrase"))
-            .map_err(|_| BotError::Config("Missing POLYMARKET_PASSPHRASE or passphrase".into()))?;
-
-        let private_key = std::env::var("PRIVATE_KEY")
-            .or_else(|_| std::env::var("private_key"))
-            .map_err(|_| BotError::Config("Missing PRIVATE_KEY or private_key".into()))?;
-
-        let wallet_address = std::env::var("WALLET_ADDRESS")
-            .or_else(|_| std::env::var("builder_address"))
-            .map_err(|_| BotError::Config("Missing WALLET_ADDRESS or builder_address".into()))?;
-
         // Operating mode (default to paper)
         let mode = match std::env::var("BOT_MODE").as_deref() {
             Ok("live") => OperatingMode::Live,
             _ => OperatingMode::Paper,
         };
+
+        // Credentials are optional in Paper mode, required in Live mode
+        let api_key = std::env::var("POLYMARKET_API_KEY")
+            .or_else(|_| std::env::var("api_key"))
+            .ok();
+        let secret_key = std::env::var("POLYMARKET_SECRET")
+            .or_else(|_| std::env::var("secret_key"))
+            .ok();
+        let passphrase = std::env::var("POLYMARKET_PASSPHRASE")
+            .or_else(|_| std::env::var("passphrase"))
+            .ok();
+        let private_key = std::env::var("PRIVATE_KEY")
+            .or_else(|_| std::env::var("private_key"))
+            .ok();
+        let wallet_address = std::env::var("WALLET_ADDRESS")
+            .or_else(|_| std::env::var("builder_address"))
+            .ok();
+
+        // Live mode requires all credentials
+        if mode == OperatingMode::Live {
+            if api_key.is_none() || secret_key.is_none() || passphrase.is_none()
+                || private_key.is_none() || wallet_address.is_none()
+            {
+                return Err(BotError::Config(
+                    "Live mode requires all credentials: POLYMARKET_API_KEY, POLYMARKET_SECRET, \
+                     POLYMARKET_PASSPHRASE, PRIVATE_KEY, WALLET_ADDRESS"
+                        .into(),
+                ));
+            }
+        }
 
         let log_level = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into());
 
@@ -104,9 +114,9 @@ impl Config {
 
         Ok(Config {
             api_key,
-            secret_key: secret_key.trim_matches('"').to_string(),
-            passphrase: passphrase.trim_matches('"').to_string(),
-            private_key: private_key.trim_matches('"').to_string(),
+            secret_key: secret_key.map(|s| s.trim_matches('"').to_string()),
+            passphrase: passphrase.map(|s| s.trim_matches('"').to_string()),
+            private_key: private_key.map(|s| s.trim_matches('"').to_string()),
             wallet_address,
             mode,
             log_level,
@@ -124,6 +134,28 @@ impl Config {
     /// Check if running in paper trading mode
     pub fn is_paper_mode(&self) -> bool {
         self.mode == OperatingMode::Paper
+    }
+
+    /// Check if API credentials are available for authentication
+    ///
+    /// Returns false if any credential is missing or is a placeholder value
+    /// (empty, "0x", or similar stubs from .env.example).
+    pub fn has_credentials(&self) -> bool {
+        fn is_valid(val: &Option<String>) -> bool {
+            match val.as_deref() {
+                Some(s) => {
+                    let s = s.trim();
+                    !s.is_empty() && s != "0x" && s != "0x0" && s.len() > 4
+                }
+                None => false,
+            }
+        }
+
+        is_valid(&self.api_key)
+            && is_valid(&self.secret_key)
+            && is_valid(&self.passphrase)
+            && is_valid(&self.private_key)
+            && is_valid(&self.wallet_address)
     }
 }
 

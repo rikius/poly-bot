@@ -14,7 +14,7 @@
 //! Returns `Urgency::Immediate` intents → converted to FOK orders by TakerPolicy.
 //! Both legs are grouped so partial fill handling knows they're linked.
 
-use crate::api::types::{ConditionId, Side, TokenId};
+use crate::websocket::types::{ConditionId, Side, TokenId};
 use crate::ledger::Fill;
 use crate::strategy::edge_calculator::{EdgeCalculator, EdgeConfig};
 use crate::strategy::market_pair::{MarketPair, MarketPairRegistry};
@@ -403,7 +403,7 @@ impl Strategy for MathArbStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::types::PriceLevel;
+    use crate::websocket::types::PriceLevel;
     use crate::ledger::Ledger;
     use crate::state::OrderBookState;
 

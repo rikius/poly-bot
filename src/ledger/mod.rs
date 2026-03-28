@@ -11,7 +11,7 @@ pub use cash::{CashBalance, CashSnapshot};
 pub use orders::{OpenOrders, OrderState, OrderStats, TrackedOrder};
 pub use positions::{Fill, Position, Positions};
 
-use crate::api::types::{Side, TokenId};
+use crate::websocket::types::{Side, TokenId};
 use rust_decimal::Decimal;
 use std::sync::Arc;
 

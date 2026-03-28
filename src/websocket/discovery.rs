@@ -14,8 +14,8 @@
 //! - First outcome (Yes/Up) = "first token"
 //! - Second outcome (No/Down) = "second token"
 
-use crate::api::gamma::{GammaClient, GammaEvent, GammaMarket};
-use crate::api::types::TokenId;
+use crate::websocket::gamma::{GammaClient, GammaEvent, GammaMarket};
+use crate::websocket::types::TokenId;
 use crate::error::{BotError, Result};
 use crate::strategy::market_pair::MarketPair;
 
@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn test_try_convert_market() {
-        let gamma_market = crate::api::gamma::GammaMarket {
+        let gamma_market = crate::websocket::gamma::GammaMarket {
             condition_id: "0xabc".to_string(),
             question: "Will BTC go up?".to_string(),
             description: String::new(),

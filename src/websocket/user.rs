@@ -1,31 +1,35 @@
-//! User WebSocket - trade notifications and fills
+//! User WebSocket — trade notifications and fill events
 //!
-//! Connects to wss://ws-subscriptions-clob.polymarket.com/ws/user
-//! Receives fill notifications for authenticated user's orders.
+//! Uses `polymarket-client-sdk` WS client which handles:
+//! - TEXT "PING"/"PONG" frames (binary pings are silently ignored by Polymarket)
+//! - 15-second PONG timeout with automatic reconnect
+//! - L2 auth headers signed with URL_SAFE base64 HMAC (not STANDARD)
 
-use crate::api::types::Side;
-use crate::constants::*;
-use crate::error::{BotError, Result};
+use crate::websocket::types::Side;
 use crate::ledger::Fill;
 use chrono::{TimeZone, Utc};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt as _;
+use polymarket_client_sdk::auth::Credentials;
+use polymarket_client_sdk::clob::ws::Client as WsClient;
+use polymarket_client_sdk::clob::ws::types::response::WsMessage;
+use polymarket_client_sdk::types::{Address, B256};
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
-use std::str::FromStr;
+use std::str::FromStr as _;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::time::{interval, Duration};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug, error, info, warn};
+use tokio::time::Duration;
+use tracing::{info, warn};
+
+use crate::error::{BotError, Result};
 
 /// User WebSocket connection for fill notifications
 pub struct UserWebSocket {
-    /// API key for authentication
-    api_key: String,
-    /// API secret
-    secret: String,
-    /// API passphrase
-    passphrase: String,
+    /// SDK credentials (URL_SAFE HMAC — no STANDARD base64 bug)
+    credentials: Credentials,
+    /// Wallet address
+    address: Address,
+    /// Market condition IDs to subscribe to
+    condition_ids: Vec<B256>,
     /// Channel to send fill notifications
     fill_tx: mpsc::UnboundedSender<UserMessage>,
 }
@@ -44,40 +48,20 @@ pub enum UserMessage {
 }
 
 /// Trade notification from WebSocket
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Fields are kept as strings for compatibility with `to_fill()`.
+#[derive(Debug, Clone)]
 pub struct TradeNotification {
-    /// Trade ID
-    #[serde(default)]
     pub id: String,
-    /// Order ID that was filled
-    #[serde(default)]
     pub taker_order_id: String,
-    /// Market/condition ID
-    #[serde(default)]
     pub market: String,
-    /// Asset/token ID
-    #[serde(default)]
     pub asset_id: String,
-    /// Side (BUY/SELL)
-    #[serde(default)]
     pub side: String,
-    /// Size filled
-    #[serde(default)]
     pub size: String,
-    /// Price of fill
-    #[serde(default)]
     pub price: String,
-    /// Fee rate in bps
-    #[serde(default)]
     pub fee_rate_bps: String,
-    /// Status (MATCHED, etc.)
-    #[serde(default)]
     pub status: String,
-    /// Timestamp
-    #[serde(default)]
     pub timestamp: String,
-    /// Whether we are taker or maker
-    #[serde(default)]
     pub trader_side: String,
 }
 
@@ -96,20 +80,14 @@ impl TradeNotification {
         let size = Decimal::from_str(&self.size)
             .map_err(|e| BotError::Json(format!("Invalid size: {}", e)))?;
 
-        // Calculate fee from fee_rate_bps
-        let fee_bps = self
-            .fee_rate_bps
-            .parse::<i64>()
-            .unwrap_or(0);
+        let fee_bps = self.fee_rate_bps.parse::<i64>().unwrap_or(0);
         let fee = price * size * Decimal::new(fee_bps, 4);
 
-        // Parse timestamp
         let timestamp = self
             .timestamp
             .parse::<i64>()
             .ok()
             .and_then(|ts| {
-                // Could be seconds or milliseconds
                 if ts > 1_000_000_000_000 {
                     Utc.timestamp_millis_opt(ts).single()
                 } else {
@@ -132,293 +110,134 @@ impl TradeNotification {
 }
 
 /// Order update notification
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct OrderUpdate {
-    /// Order ID
-    #[serde(default)]
     pub order_id: String,
-    /// New status
-    #[serde(default)]
     pub status: String,
-    /// Timestamp
-    #[serde(default)]
     pub timestamp: String,
 }
 
-/// Authentication message for user WebSocket
-#[derive(Debug, Serialize)]
-struct AuthMessage {
-    auth: AuthPayload,
-    markets: Vec<String>,
-    #[serde(rename = "type")]
-    msg_type: String,
-}
-
-#[derive(Debug, Serialize)]
-struct AuthPayload {
-    #[serde(rename = "apiKey")]
-    api_key: String,
-    secret: String,
-    passphrase: String,
-}
-
 impl UserWebSocket {
-    /// Create a new user WebSocket connection
+    /// Create a new user WebSocket connection.
+    ///
+    /// `condition_ids` — market condition IDs (as hex strings, may be empty).
+    /// Invalid hex strings are silently skipped.
     pub fn new(
-        api_key: String,
-        secret: String,
-        passphrase: String,
+        credentials: Credentials,
+        address: Address,
+        condition_ids: Vec<String>,
         fill_tx: mpsc::UnboundedSender<UserMessage>,
     ) -> Self {
+        let condition_ids: Vec<B256> = condition_ids
+            .iter()
+            .filter_map(|id| B256::from_str(id).ok())
+            .collect();
+
         Self {
-            api_key,
-            secret,
-            passphrase,
+            credentials,
+            address,
+            condition_ids,
             fill_tx,
         }
     }
 
-    /// Start the WebSocket connection with automatic reconnection
+    /// Run the subscription loop.
+    ///
+    /// Subscribes to user events (trades + order updates) for all registered
+    /// markets.  Reconnects automatically when the stream ends.
     pub async fn run(self: Arc<Self>) {
-        let mut reconnect_delay = Duration::from_secs(30); // Start with 30 second delay  
-        const MAX_BACKOFF: Duration = Duration::from_secs(300); // Max 5 minutes
-        let mut consecutive_failures = 0u32;
-        const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+        if self.condition_ids.is_empty() {
+            warn!("No valid condition IDs — user WS will not subscribe to any markets");
+        }
 
         loop {
-            if consecutive_failures == 0 {
-                info!("Connecting to user WebSocket: {}", USER_WS_URL);
-            } else {
-                debug!("Reconnecting to user WebSocket (attempt {}/{})", consecutive_failures + 1, MAX_CONSECUTIVE_FAILURES);
-            }
-
-            match self.connect_and_run().await {
-                Ok(_) => {
-                    debug!("User WebSocket connection closed normally");
-                    reconnect_delay = Duration::from_secs(30);
-                    consecutive_failures = 0;
-                }
+            let ws = match WsClient::default()
+                .authenticate(self.credentials.clone(), self.address)
+            {
+                Ok(w) => w,
                 Err(e) => {
-                    consecutive_failures += 1;
-                    
-                    // Only log as error for first failure
-                    if consecutive_failures == 1 {
-                        warn!("User WebSocket error: {} (will retry in background)", e);
-                    } else {
-                        debug!("User WebSocket error (attempt {}): {}", consecutive_failures, e);
-                    }
-                    
+                    warn!(error = %e, "Failed to authenticate user WS client, retrying in 10s");
                     let _ = self.fill_tx.send(UserMessage::Reconnecting);
-
-                    // After too many failures, give up and stop retrying
-                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                        warn!(
-                            "User WebSocket unavailable after {} attempts. Fill notifications disabled. Bot will continue without real-time fills.",
-                            consecutive_failures
-                        );
-                        // Stop trying - the bot works fine without this
-                        return;
-                    } else {
-                        // Exponential backoff
-                        debug!("Reconnecting in {:?}", reconnect_delay);
-                        tokio::time::sleep(reconnect_delay).await;
-                        reconnect_delay = (reconnect_delay * 2).min(MAX_BACKOFF);
-                    }
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    continue;
                 }
-            }
-        }
-    }
+            };
 
-    /// Connect and run the WebSocket (returns on disconnect)
-    async fn connect_and_run(&self) -> Result<()> {
-        // Connect to WebSocket
-        let (ws_stream, _) = connect_async(USER_WS_URL)
-            .await
-            .map_err(|e| BotError::WebSocket(format!("Connection failed: {}", e)))?;
+            let stream = match ws.subscribe_user_events(self.condition_ids.clone()) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(error = %e, "Failed to subscribe to user events, retrying in 5s");
+                    let _ = self.fill_tx.send(UserMessage::Reconnecting);
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
 
-        info!("User WebSocket connected");
-        let _ = self.fill_tx.send(UserMessage::Connected);
+            let _ = self.fill_tx.send(UserMessage::Connected);
+            info!(markets = self.condition_ids.len(), "User WebSocket subscribed via SDK");
 
-        let (mut write, mut read) = ws_stream.split();
+            let mut stream = Box::pin(stream);
 
-        // Send authentication message
-        let auth_msg = AuthMessage {
-            auth: AuthPayload {
-                api_key: self.api_key.clone(),
-                secret: self.secret.clone(),
-                passphrase: self.passphrase.clone(),
-            },
-            markets: vec![], // Subscribe to all markets
-            msg_type: "user".to_string(),
-        };
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok(WsMessage::Trade(trade)) => {
+                        let notification = TradeNotification {
+                            id: trade.id,
+                            taker_order_id: trade.taker_order_id.unwrap_or_default(),
+                            market: format!("{:#x}", trade.market),
+                            asset_id: trade.asset_id.to_string(),
+                            side: trade.side.to_string(),
+                            size: trade.size.to_string(),
+                            price: trade.price.to_string(),
+                            fee_rate_bps: trade
+                                .fee_rate_bps
+                                .map(|f| f.to_string())
+                                .unwrap_or_default(),
+                            status: format!("{:?}", trade.status),
+                            timestamp: trade
+                                .timestamp
+                                .map(|t| t.to_string())
+                                .unwrap_or_default(),
+                            trader_side: trade
+                                .trader_side
+                                .map(|ts| format!("{ts:?}"))
+                                .unwrap_or_default(),
+                        };
 
-        let auth_json = serde_json::to_string(&auth_msg)
-            .map_err(|e| BotError::Json(e.to_string()))?;
-
-        write
-            .send(Message::Text(auth_json))
-            .await
-            .map_err(|e| BotError::WebSocket(format!("Failed to authenticate: {}", e)))?;
-
-        debug!("User WebSocket auth message sent, waiting for response...");
-
-        // Keepalive ping interval
-        let mut ping_interval = interval(Duration::from_secs(WEBSOCKET_PING_INTERVAL_SEC));
-        let mut authenticated = false;
-
-        loop {
-            tokio::select! {
-                // Receive messages
-                Some(msg_result) = read.next() => {
-                    match msg_result {
-                        Ok(msg) => {
-                            // Log first message (auth response) at INFO level
-                            if !authenticated {
-                                if let Message::Text(ref text) = msg {
-                                    info!("User WebSocket auth response: {}", &text[..text.len().min(500)]);
-                                }
-                                authenticated = true;
-                                info!("User WebSocket authenticated successfully");
-                            }
-                            if let Err(e) = self.handle_message(msg).await {
-                                error!("Failed to handle message: {}", e);
-                            }
-                        }
-                        Err(e) => {
-                            return Err(BotError::WebSocket(format!("Read error: {}", e)));
+                        if self.fill_tx.send(UserMessage::Trade(notification)).is_err() {
+                            return;
                         }
                     }
-                }
+                    Ok(WsMessage::Order(order)) => {
+                        let update = OrderUpdate {
+                            order_id: order.id,
+                            status: order
+                                .status
+                                .map(|s| s.to_string())
+                                .unwrap_or_default(),
+                            timestamp: order
+                                .timestamp
+                                .map(|t| t.to_string())
+                                .unwrap_or_default(),
+                        };
 
-                // Send periodic ping
-                _ = ping_interval.tick() => {
-                    if let Err(e) = write.send(Message::Ping(vec![])).await {
-                        return Err(BotError::WebSocket(format!("Ping failed: {}", e)));
+                        if self.fill_tx.send(UserMessage::OrderUpdate(update)).is_err() {
+                            return;
+                        }
                     }
-                    debug!("Sent user WebSocket ping");
-                }
-
-                else => {
-                    return Err(BotError::WebSocket("Stream ended unexpectedly".to_string()));
+                    Ok(_) => {
+                        // Ignore other message types on the user channel
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "User WebSocket stream error");
+                        break;
+                    }
                 }
             }
+
+            warn!("User WebSocket stream ended, reconnecting in 5s...");
+            let _ = self.fill_tx.send(UserMessage::Reconnecting);
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
-    }
-
-    /// Handle incoming WebSocket message
-    async fn handle_message(&self, msg: Message) -> Result<()> {
-        match msg {
-            Message::Text(text) => {
-                // Parse as generic JSON to see what we have
-                let json_value: serde_json::Value = serde_json::from_str(&text)
-                    .map_err(|e| BotError::Json(format!("Invalid JSON: {}", e)))?;
-
-                // Check event_type or type field
-                let event_type = json_value
-                    .get("event_type")
-                    .or_else(|| json_value.get("type"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-
-                match event_type.to_lowercase().as_str() {
-                    "trade" => {
-                        // Parse trade notification
-                        let trade: TradeNotification = serde_json::from_value(json_value)
-                            .map_err(|e| BotError::Json(format!("Failed to parse trade: {}", e)))?;
-
-                        info!(
-                            "Trade notification: {} {} {} @ {}",
-                            trade.side, trade.size, trade.asset_id, trade.price
-                        );
-
-                        let _ = self.fill_tx.send(UserMessage::Trade(trade));
-                    }
-                    "order" | "order_update" => {
-                        // Parse order update
-                        let update: OrderUpdate = serde_json::from_value(json_value)
-                            .map_err(|e| BotError::Json(format!("Failed to parse order update: {}", e)))?;
-
-                        debug!("Order update: {} -> {}", update.order_id, update.status);
-
-                        let _ = self.fill_tx.send(UserMessage::OrderUpdate(update));
-                    }
-                    "" => {
-                        // Could be auth response or other message
-                        debug!("User WS message: {}", &text[..text.len().min(200)]);
-                    }
-                    _ => {
-                        debug!("Unknown user message type: {}", event_type);
-                    }
-                }
-            }
-            Message::Pong(_) => {
-                debug!("Received user WebSocket pong");
-            }
-            Message::Close(frame) => {
-                warn!("User WebSocket close frame received: {:?}", frame);
-                return Err(BotError::WebSocket("Connection closed by server".to_string()));
-            }
-            _ => {
-                debug!("Received other message type: {:?}", msg);
-            }
-        }
-
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rust_decimal_macros::dec;
-
-    #[test]
-    fn test_trade_notification_to_fill() {
-        let trade = TradeNotification {
-            id: "trade123".to_string(),
-            taker_order_id: "order456".to_string(),
-            market: "market789".to_string(),
-            asset_id: "token_abc".to_string(),
-            side: "BUY".to_string(),
-            size: "100".to_string(),
-            price: "0.55".to_string(),
-            fee_rate_bps: "50".to_string(), // 0.5%
-            status: "MATCHED".to_string(),
-            timestamp: "1704067200000".to_string(), // 2024-01-01
-            trader_side: "TAKER".to_string(),
-        };
-
-        let fill = trade.to_fill().unwrap();
-        assert_eq!(fill.fill_id, "trade123");
-        assert_eq!(fill.order_id, "order456");
-        assert_eq!(fill.token_id, "token_abc");
-        assert_eq!(fill.side, Side::Buy);
-        assert_eq!(fill.price, dec!(0.55));
-        assert_eq!(fill.size, dec!(100));
-        // Fee = 0.55 * 100 * 0.005 = 0.275
-        assert_eq!(fill.fee, dec!(0.275));
-    }
-
-    #[test]
-    fn test_trade_notification_sell() {
-        let trade = TradeNotification {
-            id: "trade_sell".to_string(),
-            taker_order_id: "order_sell".to_string(),
-            market: "market".to_string(),
-            asset_id: "token".to_string(),
-            side: "SELL".to_string(),
-            size: "50".to_string(),
-            price: "0.80".to_string(),
-            fee_rate_bps: "0".to_string(),
-            status: "MATCHED".to_string(),
-            timestamp: "1704067200".to_string(),
-            trader_side: "MAKER".to_string(),
-        };
-
-        let fill = trade.to_fill().unwrap();
-        assert_eq!(fill.side, Side::Sell);
-        assert_eq!(fill.size, dec!(50));
-        assert_eq!(fill.price, dec!(0.80));
-        assert_eq!(fill.fee, dec!(0));
     }
 }

@@ -1,14 +1,17 @@
 //! Reconciliation - REST sync loop to detect state drift
 //!
-//! Periodically fetches open orders from the server and compares with local ledger.
-//! Detects discrepancies and triggers circuit breaker if needed.
+//! Periodically fetches open orders from the server via SDK and compares
+//! with local ledger. Detects discrepancies and triggers circuit breaker
+//! if needed.
 
-use crate::api::client::ApiClient;
 use crate::constants::RECONCILIATION_INTERVAL;
 use crate::execution::Discrepancy;
 use crate::ledger::{OpenOrders, OrderState};
 use crate::risk::CircuitBreaker;
-use rust_decimal::Decimal;
+use polymarket_client_sdk::auth::Normal;
+use polymarket_client_sdk::auth::state::Authenticated;
+use polymarket_client_sdk::clob::Client as ClobClient;
+use polymarket_client_sdk::clob::types::request::OrdersRequest;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,8 +45,8 @@ pub enum ReconciliationMessage {
 
 /// Reconciliation loop - runs in background
 pub struct ReconciliationLoop {
-    /// API client for REST calls
-    client: Arc<ApiClient>,
+    /// SDK CLOB client for REST calls
+    clob_client: ClobClient<Authenticated<Normal>>,
     /// Local orders state
     orders: Arc<OpenOrders>,
     /// Circuit breaker to trigger on failures
@@ -57,13 +60,13 @@ pub struct ReconciliationLoop {
 impl ReconciliationLoop {
     /// Create a new reconciliation loop
     pub fn new(
-        client: Arc<ApiClient>,
+        clob_client: ClobClient<Authenticated<Normal>>,
         orders: Arc<OpenOrders>,
         circuit_breaker: Arc<CircuitBreaker>,
         tx: mpsc::UnboundedSender<ReconciliationMessage>,
     ) -> Self {
         Self {
-            client,
+            clob_client,
             orders,
             circuit_breaker,
             interval: RECONCILIATION_INTERVAL,
@@ -73,14 +76,14 @@ impl ReconciliationLoop {
 
     /// Create with custom interval (for testing)
     pub fn with_interval(
-        client: Arc<ApiClient>,
+        clob_client: ClobClient<Authenticated<Normal>>,
         orders: Arc<OpenOrders>,
         circuit_breaker: Arc<CircuitBreaker>,
         tx: mpsc::UnboundedSender<ReconciliationMessage>,
         interval: Duration,
     ) -> Self {
         Self {
-            client,
+            clob_client,
             orders,
             circuit_breaker,
             interval,
@@ -134,13 +137,15 @@ impl ReconciliationLoop {
 
     /// Run a single reconciliation check
     pub async fn reconcile_once(&self) -> Result<ReconciliationResult, String> {
-        // Fetch server orders
-        let server_orders = self
-            .client
-            .get_orders()
+        // Fetch server orders via SDK (first page, default request = all orders)
+        let request = OrdersRequest::default();
+        let page = self
+            .clob_client
+            .orders(&request, None)
             .await
             .map_err(|e| format!("Failed to fetch orders: {}", e))?;
 
+        let server_orders = page.data;
         let server_order_count = server_orders.len();
 
         // Get local orders
@@ -188,15 +193,14 @@ impl ReconciliationLoop {
                 .iter()
                 .find(|o| o.order_id.as_ref() == Some(&server_order.id))
             {
-                let server_state = parse_server_status(&server_order.status);
-                
+                let server_state = parse_sdk_status(&server_order.status);
+
                 // If server says filled but we don't, that's a mismatch
                 if server_state == OrderState::Filled && local_order.state != OrderState::Filled {
-                    let server_filled = parse_filled_size(&server_order.size_matched);
                     discrepancies.push(Discrepancy::StateMismatch {
                         order_id: server_order.id.clone(),
                         local_state: local_order.state,
-                        remote_filled: server_filled,
+                        remote_filled: server_order.size_matched,
                         local_filled: local_order.filled_size,
                     });
                 }
@@ -215,21 +219,17 @@ impl ReconciliationLoop {
     }
 }
 
-/// Parse server status string to OrderState
-fn parse_server_status(status: &str) -> OrderState {
-    match status.to_lowercase().as_str() {
-        "live" | "open" => OrderState::Acked,
-        "matched" | "filled" => OrderState::Filled,
-        "cancelled" | "canceled" => OrderState::Cancelled,
-        "expired" => OrderState::Expired,
-        "rejected" => OrderState::Rejected,
-        _ => OrderState::Unknown,
+/// Parse SDK OrderStatusType to local OrderState
+fn parse_sdk_status(status: &polymarket_client_sdk::clob::types::OrderStatusType) -> OrderState {
+    use polymarket_client_sdk::clob::types::OrderStatusType;
+    match status {
+        OrderStatusType::Live => OrderState::Acked,
+        OrderStatusType::Matched => OrderState::Filled,
+        OrderStatusType::Canceled => OrderState::Cancelled,
+        OrderStatusType::Delayed => OrderState::Acked,
+        OrderStatusType::Unmatched => OrderState::Rejected,
+        OrderStatusType::Unknown(_) | _ => OrderState::Unknown,
     }
-}
-
-/// Parse filled size from string
-fn parse_filled_size(size_str: &str) -> Decimal {
-    size_str.parse().unwrap_or(Decimal::ZERO)
 }
 
 impl Discrepancy {
@@ -261,16 +261,18 @@ impl Discrepancy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use polymarket_client_sdk::clob::types::OrderStatusType;
     use rust_decimal_macros::dec;
 
     #[test]
-    fn test_parse_server_status() {
-        assert_eq!(parse_server_status("live"), OrderState::Acked);
-        assert_eq!(parse_server_status("LIVE"), OrderState::Acked);
-        assert_eq!(parse_server_status("matched"), OrderState::Filled);
-        assert_eq!(parse_server_status("cancelled"), OrderState::Cancelled);
-        assert_eq!(parse_server_status("expired"), OrderState::Expired);
-        assert_eq!(parse_server_status("unknown_status"), OrderState::Unknown);
+    fn test_parse_sdk_status() {
+        assert_eq!(parse_sdk_status(&OrderStatusType::Live), OrderState::Acked);
+        assert_eq!(parse_sdk_status(&OrderStatusType::Matched), OrderState::Filled);
+        assert_eq!(parse_sdk_status(&OrderStatusType::Canceled), OrderState::Cancelled);
+        assert_eq!(
+            parse_sdk_status(&OrderStatusType::Unknown("test".to_string())),
+            OrderState::Unknown
+        );
     }
 
     #[test]

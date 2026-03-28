@@ -2,15 +2,22 @@
 //!
 //! High-frequency trading bot for Polymarket prediction markets.
 
-use polymarket_bot::api::MarketDiscovery;
+use polymarket_bot::websocket::MarketDiscovery;
+use polymarket_bot::latency;
 use polymarket_bot::strategy::MarketPair;
 use polymarket_bot::{Bot, Config, KillSwitch};
+use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use std::sync::Arc;
 use tokio::signal;
 use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Install TLS crypto provider before any network calls
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -40,13 +47,17 @@ async fn main() -> anyhow::Result<()> {
     };
 
     info!("Configuration loaded successfully");
-    info!("  Wallet: {}", config.wallet_address);
+    info!("  Wallet: {}", config.wallet_address.as_deref().unwrap_or("(none - paper mode)"));
     info!("  Mode: {:?}", config.mode);
     info!("  Max bet: ${}", config.max_bet_usd);
     info!("  Max daily loss: ${}", config.max_daily_loss_usd);
 
     if config.is_paper_mode() {
-        warn!(">>> PAPER TRADING MODE - No real orders will be placed <<<");
+        if config.has_credentials() {
+            warn!(">>> PAPER TRADING MODE - No real orders will be placed <<<");
+        } else {
+            warn!(">>> PAPER TRADING MODE (no credentials) - Simulation only <<<");
+        }
     } else {
         warn!(">>> LIVE TRADING MODE - Real money at risk! <<<");
     }
@@ -67,6 +78,47 @@ async fn main() -> anyhow::Result<()> {
     info!("  - Set POLYBOT_KILL=1 to stop");
     info!("  - Or create /tmp/polybot_kill");
     info!("  - Or press Ctrl+C");
+
+    // ===========================================================================
+    // LATENCY PROBE — pick lowest-RTT endpoint
+    // ===========================================================================
+    let selected = latency::probe_best_endpoint().await;
+    info!(
+        endpoint = %selected.url,
+        rtt_ms = selected.rtt_ms,
+        "Using endpoint"
+    );
+
+    // ===========================================================================
+    // GEOBLOCK CHECK — verify trading is allowed from this IP
+    // ===========================================================================
+    {
+        let clob_client = ClobClient::new(&selected.url, ClobConfig::default())
+            .expect("Failed to create CLOB client for geoblock check");
+
+        match clob_client.check_geoblock().await {
+            Ok(geo) => {
+                if geo.blocked {
+                    error!(
+                        "Trading not available from {} (IP: {}, region: {})",
+                        geo.country, geo.ip, geo.region
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Geoblocked: trading not available in {}/{}",
+                        geo.country,
+                        geo.region
+                    ));
+                }
+                info!(
+                    "Geoblock check passed (IP: {}, country: {}, region: {})",
+                    geo.ip, geo.country, geo.region
+                );
+            }
+            Err(e) => {
+                warn!("Geoblock check failed (proceeding anyway): {}", e);
+            }
+        }
+    }
 
     // ===========================================================================
     // MARKET DISCOVERY
@@ -139,7 +191,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Registered {} market pair(s) with {} token(s)", market_pairs.len(), token_ids.len());
 
     // Create and run the bot
-    let mut bot = Bot::new(config, kill_switch.clone(), token_ids, market_pairs).await;
+    let mut bot = Bot::new(config, kill_switch.clone(), token_ids, market_pairs, &selected.url).await;
     bot.run().await;
 
     // Graceful shutdown

@@ -3,7 +3,7 @@
 //! Tracks all orders from creation through completion with state machine transitions.
 //! Uses DashMap for lock-free concurrent access.
 
-use crate::api::types::{OrderId, Side, TokenId};
+use crate::websocket::types::{OrderId, Side, TokenId};
 use crate::error::{BotError, Result};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;

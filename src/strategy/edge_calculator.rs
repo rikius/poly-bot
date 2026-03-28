@@ -11,7 +11,7 @@
 //! - Missing opportunities (threshold too high)
 //! - Unprofitable trades (threshold too low)
 
-use crate::api::types::TokenId;
+use crate::websocket::types::TokenId;
 use crate::constants::{DEFAULT_MIN_EDGE, MAKER_MIN_EDGE, THIN_BOOK_EXTRA_MARGIN};
 use crate::state::order_book::BookSnapshot;
 use crate::state::OrderBookState;
@@ -352,7 +352,7 @@ impl Default for EdgeCalculator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::types::PriceLevel;
+    use crate::websocket::types::PriceLevel;
 
     fn make_book(token_id: &str, best_bid: &str, best_ask: &str, depth: &str) -> BookSnapshot {
         BookSnapshot {

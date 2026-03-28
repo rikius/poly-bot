@@ -3,7 +3,7 @@
 //! Tracks all positions (shares held) per token. Updates ONLY from confirmed fills.
 //! Never updates from expected or unconfirmed events.
 
-use crate::api::types::{Side, TokenId};
+use crate::websocket::types::{Side, TokenId};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use rust_decimal::prelude::Signed;

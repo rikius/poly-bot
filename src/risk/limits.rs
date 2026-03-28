@@ -3,7 +3,7 @@
 //! Pre-trade and ongoing checks to enforce position limits, loss limits,
 //! and exposure constraints.
 
-use crate::api::types::{Side, TokenId};
+use crate::websocket::types::{Side, TokenId};
 use crate::constants::*;
 use crate::ledger::Ledger;
 use rust_decimal::Decimal;

@@ -19,7 +19,7 @@
 //! 2. Know which is the first and second outcome
 //! 3. Look up the complement when one side updates
 
-use crate::api::types::{ConditionId, TokenId};
+use crate::websocket::types::{ConditionId, TokenId};
 use dashmap::DashMap;
 use rust_decimal::Decimal;
 use std::sync::Arc;

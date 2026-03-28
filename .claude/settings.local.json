@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(docker compose:*)",
+      "Bash(curl:*)",
+      "WebFetch(domain:docs.rs)",
+      "Bash(grep -n \"ApiClient\\\\|ApiEndpoints\" /c/Users/Ramunas/projects/polymarket-bot-rust/src/*.rs)",
+      "Bash(wc -l /c/Users/Ramunas/projects/polymarket-bot-rust/src/api/*.rs)",
+      "Bash(xargs grep:*)",
+      "Bash(cargo build:*)",
+      "Bash(ls -la /c/Users/Ramunas/.cargo/registry/cache/*/polymarket*)",
+      "Bash(cargo metadata:*)",
+      "Bash(cargo tree:*)",
+      "Bash(cargo doc:*)",
+      "Bash(find /c/Users/Ramunas -type f -name *.rs)",
+      "WebSearch",
+      "WebFetch(domain:docs.polymarket.com)"
+    ]
+  }
+}

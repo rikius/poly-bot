@@ -3,26 +3,33 @@ name = "polymarket_bot"
 version = "0.1.0"
 edition = "2021"
 description = "High-frequency Polymarket trading bot"
-authors = ["x0ponti"]
+authors = [""]
 
 [dependencies]
+# Polymarket official SDK
+polymarket-client-sdk = { version = "0.4", features = ["clob", "ws", "gamma", "data", "tracing"] }
+
 # Async runtime
 tokio = { version = "1", features = ["full", "rt-multi-thread", "fs", "signal"] }
 
-# WebSocket
-tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+# Streams (SDK WS returns impl Stream)
 futures-util = "0.3"
 
 # HTTP client (optimized)
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "gzip"] }
 
-# JSON parsing (SIMD-optimized)
-simd-json = "0.13"
+# TLS — install aws-lc-rs as the process-level crypto provider for rustls
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+
+# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Ethereum signing (use latest v1.x - more stable)
-alloy = { version = "1", features = ["signers", "signer-local", "sol-types"] }
+# Signing type alias — SDK re-exports LocalSigner + Signer trait but its sign()
+# method requires Sized, so we need the concrete PrivateKeySigner type alias.
+# Using the small alloy-signer-local crate (already compiled as SDK transitive dep)
+# instead of the full alloy metapackage.
+alloy-signer-local = "1"
 
 # Concurrent data structures
 dashmap = "5.5"
@@ -48,11 +55,6 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 # Configuration
 dotenvy = "0.15"
 
-# HMAC for API auth
-hmac = "0.12"
-sha2 = "0.10"
-base64 = "0.21"
-hex = "0.4"
 
 [dev-dependencies]
 tokio-test = "0.4"

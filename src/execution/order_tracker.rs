@@ -7,7 +7,7 @@
 //! - Cancel all orders before market close
 //! - Track partial fills
 
-use crate::api::types::{ConditionId, OrderId, Side, TokenId};
+use crate::websocket::types::{ConditionId, OrderId, Side, TokenId};
 use dashmap::DashMap;
 use rust_decimal::Decimal;
 use std::collections::HashSet;

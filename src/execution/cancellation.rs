@@ -1,21 +1,23 @@
 //! Order cancellation manager
 //!
-//! Handles cancelling orders:
+//! Handles cancelling orders via the SDK:
 //! - Stale orders (older than TTL)
 //! - Orders for a specific market (before market close)
 //! - All orders (emergency shutdown)
 
-use crate::api::ApiClient;
-use crate::api::types::{ConditionId, OrderId};
+use crate::websocket::types::{ConditionId, OrderId};
 use crate::execution::OrderTracker;
+use polymarket_client_sdk::auth::Normal;
+use polymarket_client_sdk::auth::state::Authenticated;
+use polymarket_client_sdk::clob::Client as ClobClient;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 /// Manages order cancellations
 pub struct CancellationManager {
-    /// API client for cancellation requests
-    api_client: Arc<ApiClient>,
+    /// SDK CLOB client for cancellation requests
+    clob_client: ClobClient<Authenticated<Normal>>,
 
     /// Order tracker to know which orders exist
     order_tracker: Arc<OrderTracker>,
@@ -27,12 +29,12 @@ pub struct CancellationManager {
 impl CancellationManager {
     /// Create a new cancellation manager
     pub fn new(
-        api_client: Arc<ApiClient>,
+        clob_client: ClobClient<Authenticated<Normal>>,
         order_tracker: Arc<OrderTracker>,
         stale_order_ttl: Duration,
     ) -> Self {
         Self {
-            api_client,
+            clob_client,
             order_tracker,
             stale_order_ttl,
         }
@@ -42,8 +44,13 @@ impl CancellationManager {
     pub async fn cancel(&self, order_id: &OrderId) -> Result<(), String> {
         debug!(order_id = %order_id, "Cancelling order");
 
-        match self.api_client.cancel_order(order_id).await {
-            Ok(_) => {
+        match self.clob_client.cancel_order(order_id).await {
+            Ok(response) => {
+                if response.not_canceled.contains_key(order_id.as_str()) {
+                    let reason = &response.not_canceled[order_id.as_str()];
+                    error!(order_id = %order_id, reason = %reason, "Order not cancelled");
+                    return Err(format!("Not cancelled: {}", reason));
+                }
                 self.order_tracker.remove(order_id);
                 info!(order_id = %order_id, "Order cancelled");
                 Ok(())
@@ -117,30 +124,42 @@ impl CancellationManager {
 
     /// Cancel all outstanding orders (emergency)
     ///
-    /// Returns the number of orders cancelled
+    /// Uses the SDK's bulk cancel-all endpoint for speed.
+    /// Returns the number of orders cancelled.
     pub async fn cancel_all(&self) -> usize {
-        let all_orders = self.order_tracker.all_orders();
+        let tracked = self.order_tracker.all_orders();
 
-        if all_orders.is_empty() {
+        if tracked.is_empty() {
             info!("No orders to cancel");
             return 0;
         }
 
         warn!(
-            order_count = all_orders.len(),
+            order_count = tracked.len(),
             "EMERGENCY: Cancelling all orders"
         );
 
-        let mut cancelled = 0;
-        for order_id in all_orders {
-            if self.cancel(&order_id).await.is_ok() {
-                cancelled += 1;
+        match self.clob_client.cancel_all_orders().await {
+            Ok(response) => {
+                let cancelled = response.canceled.len();
+                // Remove all from tracker
+                for id in &response.canceled {
+                    self.order_tracker.remove(id);
+                }
+                warn!(cancelled = cancelled, "Emergency cancellation complete");
+                cancelled
+            }
+            Err(e) => {
+                error!(error = %e, "Bulk cancel failed, falling back to individual cancels");
+                let mut cancelled = 0;
+                for order_id in tracked {
+                    if self.cancel(&order_id).await.is_ok() {
+                        cancelled += 1;
+                    }
+                }
+                cancelled
             }
         }
-
-        warn!(cancelled = cancelled, "Emergency cancellation complete");
-
-        cancelled
     }
 
     /// Cancel all orders in a group (e.g., unwind arb legs)
@@ -170,14 +189,8 @@ impl CancellationManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    // Note: Full tests would require mocking ApiClient
-    // These are placeholder tests for the structure
-
     #[test]
     fn test_cancellation_manager_creation() {
-        // This test would require mocking, skipped for now
-        // Just verifying the struct compiles correctly
+        // Requires ClobClient — integration test only
     }
 }
