@@ -686,6 +686,22 @@ impl Bot {
                 required,
                 label,
             );
+
+            // Log top-3 book depth so we can see if real orders exist below protective 0.990
+            let (yes_bids, yes_asks) = self.order_book_state.top_levels(&pair.yes_token_id, 3);
+            let (no_bids, no_asks) = self.order_book_state.top_levels(&pair.no_token_id, 3);
+            let fmt_levels = |levels: &[(Decimal, Decimal)]| -> String {
+                levels.iter().map(|(p, s)| format!("{:.3}x{:.0}", p, s)).collect::<Vec<_>>().join(" ")
+            };
+            debug!(
+                "  YES bids=[{}] asks=[{}]",
+                fmt_levels(&yes_bids), fmt_levels(&yes_asks),
+            );
+            debug!(
+                "  NO  bids=[{}] asks=[{}]",
+                fmt_levels(&no_bids), fmt_levels(&no_asks),
+            );
+
             any_logged = true;
         }
 

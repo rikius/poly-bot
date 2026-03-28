@@ -40,15 +40,34 @@ impl OrderBookState {
     }
 
     /// Update order book from WebSocket message (full snapshot)
+    ///
+    /// Explicitly re-sorts on ingestion so `best_bid()` / `best_ask()` are
+    /// always correct regardless of the order the SDK delivers levels.
+    /// Bids: descending (highest price = best bid first).
+    /// Asks: ascending  (lowest  price = best ask first).
     pub fn update_book(
         &self,
         token_id: TokenId,
         market: String,
-        bids: Vec<PriceLevel>,
-        asks: Vec<PriceLevel>,
+        mut bids: Vec<PriceLevel>,
+        mut asks: Vec<PriceLevel>,
         timestamp: Option<i64>,
         hash: Option<String>,
     ) {
+        // Sort bids descending (best bid = highest price first)
+        bids.sort_by(|a, b| {
+            let pa = a.price.parse::<Decimal>().unwrap_or(Decimal::ZERO);
+            let pb = b.price.parse::<Decimal>().unwrap_or(Decimal::ZERO);
+            pb.cmp(&pa)
+        });
+
+        // Sort asks ascending (best ask = lowest price first)
+        asks.sort_by(|a, b| {
+            let pa = a.price.parse::<Decimal>().unwrap_or(Decimal::MAX);
+            let pb = b.price.parse::<Decimal>().unwrap_or(Decimal::MAX);
+            pa.cmp(&pb)
+        });
+
         let snapshot = BookSnapshot {
             token_id: token_id.clone(),
             market,
@@ -210,6 +229,29 @@ impl OrderBookState {
             .get(token_id)
             .and_then(|book| book.asks.first().map(|level| level.size.clone()))
             .and_then(|size| size.parse::<Decimal>().ok())
+    }
+
+    /// Get top N bid and ask levels for diagnostics.
+    /// Returns (bids, asks) each as Vec<(price, size)> capped at `n`.
+    pub fn top_levels(&self, token_id: &TokenId, n: usize) -> (Vec<(Decimal, Decimal)>, Vec<(Decimal, Decimal)>) {
+        match self.books.get(token_id) {
+            None => (vec![], vec![]),
+            Some(book) => {
+                let bids = book.bids.iter().take(n)
+                    .filter_map(|l| {
+                        let p = l.price.parse::<Decimal>().ok()?;
+                        let s = l.size.parse::<Decimal>().ok()?;
+                        Some((p, s))
+                    }).collect();
+                let asks = book.asks.iter().take(n)
+                    .filter_map(|l| {
+                        let p = l.price.parse::<Decimal>().ok()?;
+                        let s = l.size.parse::<Decimal>().ok()?;
+                        Some((p, s))
+                    }).collect();
+                (bids, asks)
+            }
+        }
     }
 
     /// Get number of tracked token IDs
