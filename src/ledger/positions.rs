@@ -26,6 +26,10 @@ pub struct Position {
     pub unrealized_pnl: Decimal,
     /// Total fees paid on this position
     pub total_fees: Decimal,
+    /// Cumulative slippage cost in USDC (positive = unfavourable)
+    pub total_slippage_cost: Decimal,
+    /// Number of fills applied to this position
+    pub fill_count: u32,
     /// When position was opened
     pub opened_at: DateTime<Utc>,
     /// Last update time
@@ -44,6 +48,8 @@ impl Position {
             realized_pnl: Decimal::ZERO,
             unrealized_pnl: Decimal::ZERO,
             total_fees: Decimal::ZERO,
+            total_slippage_cost: Decimal::ZERO,
+            fill_count: 0,
             opened_at: now,
             last_update: now,
         }
@@ -103,12 +109,22 @@ pub struct Fill {
     pub token_id: TokenId,
     /// Buy or Sell
     pub side: Side,
-    /// Price of the fill
+    /// Actual fill price
     pub price: Decimal,
     /// Size of the fill
     pub size: Decimal,
     /// Fee charged (in USDC)
     pub fee: Decimal,
+    /// Limit price of the originating order — used to compute slippage.
+    /// `None` when the fill was synthesised outside normal order flow.
+    pub expected_price: Option<Decimal>,
+    /// Slippage cost in USDC: positive = unfavourable, negative = favourable.
+    ///
+    /// Buy:  (fill_price - limit_price) * size   — paying more than intended is bad
+    /// Sell: (limit_price - fill_price) * size   — receiving less than intended is bad
+    ///
+    /// Set to zero when `expected_price` is `None`.
+    pub slippage_cost: Decimal,
     /// When the fill occurred
     pub timestamp: DateTime<Utc>,
 }
@@ -125,6 +141,38 @@ impl Fill {
             Side::Buy => self.size,
             Side::Sell => -self.size,
         }
+    }
+
+    /// Effective fee rate in basis points (derived from actual fee / notional)
+    pub fn fee_rate_bps(&self) -> u32 {
+        let notional = self.notional();
+        if notional.is_zero() {
+            return 0;
+        }
+        ((self.fee / notional) * Decimal::from(10_000u32))
+            .round()
+            .try_into()
+            .unwrap_or(0)
+    }
+
+    /// Slippage in basis points relative to the limit price.
+    /// Positive = unfavourable, negative = favourable.
+    /// Returns `None` when no expected price was recorded.
+    pub fn slippage_bps(&self) -> Option<i64> {
+        let expected = self.expected_price?;
+        if expected.is_zero() {
+            return None;
+        }
+        let raw = match self.side {
+            Side::Buy => (self.price - expected) / expected,
+            Side::Sell => (expected - self.price) / expected,
+        };
+        Some(
+            (raw * Decimal::from(10_000u32))
+                .round()
+                .try_into()
+                .unwrap_or(0),
+        )
     }
 }
 
@@ -175,8 +223,10 @@ impl Positions {
         let fill_shares = fill.signed_size();
         let new_shares = old_shares + fill_shares;
 
-        // Track fees
+        // Track fees and slippage
         position.total_fees += fill.fee;
+        position.total_slippage_cost += fill.slippage_cost;
+        position.fill_count += 1;
 
         if old_shares == Decimal::ZERO {
             // Opening a new position
@@ -256,6 +306,11 @@ impl Positions {
         self.positions.iter().map(|r| r.total_fees).sum()
     }
 
+    /// Total slippage cost (positive = unfavourable)
+    pub fn total_slippage_cost(&self) -> Decimal {
+        self.positions.iter().map(|r| r.total_slippage_cost).sum()
+    }
+
     /// Total notional exposure (sum of abs position values)
     pub fn total_notional(&self) -> Decimal {
         self.positions.iter().map(|r| r.notional()).sum()
@@ -301,6 +356,8 @@ mod tests {
             price,
             size,
             fee,
+            expected_price: None,
+            slippage_cost: Decimal::ZERO,
             timestamp: Utc::now(),
         }
     }
@@ -410,5 +467,51 @@ mod tests {
 
         let pos = positions.get(&"token1".to_string());
         assert_eq!(pos.total_fees, dec!(0.80));
+    }
+
+    #[test]
+    fn test_slippage_tracking() {
+        let positions = Positions::new();
+
+        // Buy 100 shares with limit $0.50, but fill at $0.52 (unfavourable: paid 2c more)
+        let mut fill = make_fill("token1", Side::Buy, dec!(0.52), dec!(100), dec!(0));
+        fill.expected_price = Some(dec!(0.50));
+        fill.slippage_cost = dec!(2); // (0.52 - 0.50) * 100
+        positions.apply_fill(&fill);
+
+        let pos = positions.get(&"token1".to_string());
+        assert_eq!(pos.total_slippage_cost, dec!(2));
+        assert_eq!(pos.fill_count, 1);
+
+        // Sell 100 shares with limit $0.60, fill at $0.59 (unfavourable: received 1c less)
+        let mut fill2 = make_fill("token1", Side::Sell, dec!(0.59), dec!(100), dec!(0));
+        fill2.expected_price = Some(dec!(0.60));
+        fill2.slippage_cost = dec!(1); // (0.60 - 0.59) * 100
+        positions.apply_fill(&fill2);
+
+        let pos = positions.get(&"token1".to_string());
+        assert_eq!(pos.total_slippage_cost, dec!(3));
+        assert_eq!(pos.fill_count, 2);
+    }
+
+    #[test]
+    fn test_fill_fee_rate_bps() {
+        let mut fill = make_fill("token1", Side::Buy, dec!(0.50), dec!(100), dec!(5));
+        fill.expected_price = Some(dec!(0.50));
+        // notional = 0.50 * 100 = 50, fee = 5, rate = 5/50 = 10% = 1000 bps
+        assert_eq!(fill.fee_rate_bps(), 1000);
+    }
+
+    #[test]
+    fn test_fill_slippage_bps() {
+        let mut fill = make_fill("token1", Side::Buy, dec!(0.51), dec!(100), dec!(0));
+        fill.expected_price = Some(dec!(0.50));
+        // (0.51 - 0.50) / 0.50 * 10000 = 200 bps
+        assert_eq!(fill.slippage_bps(), Some(200));
+
+        let mut sell_fill = make_fill("token1", Side::Sell, dec!(0.59), dec!(100), dec!(0));
+        sell_fill.expected_price = Some(dec!(0.60));
+        // (0.60 - 0.59) / 0.60 * 10000 ≈ 167 bps
+        assert_eq!(sell_fill.slippage_bps(), Some(167));
     }
 }

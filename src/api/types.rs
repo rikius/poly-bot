@@ -29,6 +29,10 @@ pub struct PositionInfo {
     pub unrealized_pnl: String,
     pub total_pnl: String,
     pub total_fees: String,
+    /// Cumulative slippage cost in USDC (positive = unfavourable)
+    pub total_slippage_cost: String,
+    /// Number of fills that built this position
+    pub fill_count: u32,
     pub direction: String,
     pub notional: String,
 }
@@ -54,10 +58,19 @@ pub struct FillInfo {
     pub order_id: String,
     pub token_id: String,
     pub side: String,
+    /// Actual fill price
     pub price: String,
     pub size: String,
     pub fee: String,
+    /// Fee as basis points of notional (e.g. 1000 = 10%)
+    pub fee_rate_bps: u32,
     pub notional: String,
+    /// Limit price of the originating order (null when unknown)
+    pub expected_price: Option<String>,
+    /// Slippage cost in USDC: positive = unfavourable (paid more / received less)
+    pub slippage_cost: String,
+    /// Slippage in basis points relative to limit price (null when unknown)
+    pub slippage_bps: Option<i64>,
     pub timestamp: String,
 }
 
@@ -67,6 +80,9 @@ pub struct PnlInfo {
     pub unrealized: String,
     pub total: String,
     pub total_fees: String,
+    /// Cumulative slippage cost across all positions (positive = unfavourable)
+    pub total_slippage_cost: String,
+    /// Net P&L after fees and slippage
     pub net: String,
 }
 

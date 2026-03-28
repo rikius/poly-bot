@@ -87,6 +87,8 @@ impl ApiState {
                 unrealized_pnl: p.unrealized_pnl.to_string(),
                 total_pnl: p.total_pnl().to_string(),
                 total_fees: p.total_fees.to_string(),
+                total_slippage_cost: p.total_slippage_cost.to_string(),
+                fill_count: p.fill_count,
                 direction: if p.is_long() {
                     "long".to_string()
                 } else {
@@ -143,13 +145,15 @@ impl ApiState {
         let realized = self.ledger.positions.total_realized_pnl();
         let unrealized = self.ledger.positions.total_unrealized_pnl();
         let fees = self.ledger.positions.total_fees();
+        let slippage = self.ledger.positions.total_slippage_cost();
         let total = realized + unrealized;
-        let net = total - fees;
+        let net = total - fees - slippage;
         let pnl = PnlInfo {
             realized: realized.to_string(),
             unrealized: unrealized.to_string(),
             total: total.to_string(),
             total_fees: fees.to_string(),
+            total_slippage_cost: slippage.to_string(),
             net: net.to_string(),
         };
 
@@ -196,7 +200,11 @@ fn fill_to_info(f: &Fill) -> FillInfo {
         price: f.price.to_string(),
         size: f.size.to_string(),
         fee: f.fee.to_string(),
+        fee_rate_bps: f.fee_rate_bps(),
         notional: f.notional().to_string(),
+        expected_price: f.expected_price.map(|p| p.to_string()),
+        slippage_cost: f.slippage_cost.to_string(),
+        slippage_bps: f.slippage_bps(),
         timestamp: f.timestamp.to_rfc3339(),
     }
 }
