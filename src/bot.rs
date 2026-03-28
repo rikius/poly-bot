@@ -627,6 +627,8 @@ impl Bot {
                 Some(v) => v,
                 None => continue,
             };
+            let yes_bid = self.order_book_state.best_bid(&pair.yes_token_id);
+            let no_bid = self.order_book_state.best_bid(&pair.no_token_id);
 
             let combined = yes_ask + no_ask;
             let raw_edge = Decimal::ONE - combined;
@@ -635,8 +637,16 @@ impl Bot {
             let required = fee_cost + taker_min_edge;
             let tradeable = raw_edge >= required;
 
-            let label = if combined >= Decimal::ONE {
-                "combined≥1.00 (no arb)"
+            // YES_mid + NO_mid ≈ 1 in efficient markets (this is the true
+            // probability relationship; asks can both be high in thin books).
+            let yes_mid = yes_bid.map(|b| (yes_ask + b) / dec!(2));
+            let no_mid = no_bid.map(|b| (no_ask + b) / dec!(2));
+            let mid_sum = yes_mid.zip(no_mid).map(|(y, n)| y + n);
+
+            let label = if combined > dec!(1.5) {
+                "thin book — stale protective orders (combined >> 1)"
+            } else if combined >= Decimal::ONE {
+                "combined≥1.00 — no arb (efficient market)"
             } else if !tradeable {
                 "edge < fees+min_edge"
             } else {
@@ -644,12 +654,13 @@ impl Bot {
             };
 
             info!(
-                "EdgeDiag: {} | YES_ask={:.3} NO_ask={:.3} combined={:.3} \
+                "EdgeDiag: {} | ask={:.3}+{:.3}={:.3} mid_sum={} \
                  raw_edge={:+.3} fee_cost={:.3} required={:.3} → {}",
                 &pair.condition_id[..pair.condition_id.len().min(12)],
                 yes_ask,
                 no_ask,
                 combined,
+                mid_sum.map(|m| format!("{:.3}", m)).unwrap_or_else(|| "n/a".into()),
                 raw_edge,
                 fee_cost,
                 required,
