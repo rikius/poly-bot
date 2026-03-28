@@ -26,7 +26,7 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::feeds::{ExternalPriceRecord, ExternalPriceStore};
 

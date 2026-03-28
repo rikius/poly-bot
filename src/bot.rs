@@ -91,8 +91,8 @@ pub struct Bot {
     latency: Arc<BotLatency>,
     /// Heartbeat tick counter — used to trigger periodic histogram reset (every 6 ticks = 60s)
     heartbeat_count: u32,
-    /// External price store for temporal arb (Binance feed writes here)
-    external_prices: ExternalPriceStore,
+    /// External price store for temporal arb (Binance feed writes here; read by TemporalArbStrategy)
+    _external_prices: ExternalPriceStore,
     /// Optional alert sender for circuit breaker / WS reconnect notifications
     alerts: Option<Arc<AlertSender>>,
     /// Tracks whether the circuit breaker was open at the last heartbeat, so
@@ -332,7 +332,7 @@ impl Bot {
             total_fills: 0,
             latency,
             heartbeat_count: 0,
-            external_prices,
+            _external_prices: external_prices,
             alerts,
             circuit_was_open: false,
         }

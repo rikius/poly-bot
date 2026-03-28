@@ -39,8 +39,7 @@ use std::time::Instant;
 
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use tracing::{debug, info, warn};
-use uuid::Uuid;
+use tracing::{debug, info};
 
 use crate::feeds::ExternalPriceStore;
 use crate::ledger::Fill;
