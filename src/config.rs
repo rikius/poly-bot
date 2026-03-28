@@ -20,6 +20,12 @@ pub struct Config {
     pub mode: OperatingMode,
     pub log_level: String,
 
+    // Portfolio / cash tracking
+    /// Starting USDC balance for the ledger (read from INITIAL_CASH_USD env var).
+    /// Defaults to max_total_exposure_usd when not set.
+    /// In live mode, set this to your actual USDC balance so portfolio P&L is accurate.
+    pub initial_cash_usd: Decimal,
+
     // Sizing configuration
     pub max_bet_usd: Decimal,
     pub max_position_per_market_usd: Decimal,
@@ -117,6 +123,13 @@ impl Config {
             env_decimal("MAX_POSITION_PER_MARKET_USD", Decimal::from(500));
         let max_total_exposure_usd = env_decimal("MAX_TOTAL_EXPOSURE_USD", Decimal::from(2000));
 
+        // Initial cash — defaults to max_total_exposure_usd when not explicitly set.
+        // Override with INITIAL_CASH_USD to match your actual USDC account balance.
+        let initial_cash_usd = std::env::var("INITIAL_CASH_USD")
+            .ok()
+            .and_then(|v| Decimal::from_str(&v).ok())
+            .unwrap_or(max_total_exposure_usd);
+
         // Risk limits (with defaults)
         let max_daily_loss_usd = env_decimal("MAX_DAILY_LOSS_USD", Decimal::from(100));
         let max_open_orders = std::env::var("MAX_OPEN_ORDERS")
@@ -163,6 +176,7 @@ impl Config {
             wallet_address,
             mode,
             log_level,
+            initial_cash_usd,
             max_bet_usd,
             max_position_per_market_usd,
             max_total_exposure_usd,

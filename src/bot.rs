@@ -146,7 +146,7 @@ impl Bot {
     ) -> Self {
         let config = Arc::new(config);
         let order_book_state = Arc::new(OrderBookState::new());
-        let ledger = Arc::new(Ledger::new(config.max_bet_usd));
+        let ledger = Arc::new(Ledger::new(config.initial_cash_usd));
 
         // Collect condition IDs before consuming market_pairs
         let condition_ids: Vec<String> = market_pairs.iter()
@@ -557,6 +557,24 @@ impl Bot {
             circuit_status
         );
         self.total_messages = 0;
+
+        // Mark all open positions to market so unrealized_pnl stays current.
+        {
+            let prices: Vec<(String, Decimal)> = self
+                .ledger
+                .positions
+                .all_positions()
+                .iter()
+                .filter_map(|p| {
+                    self.order_book_state
+                        .mid_price(&p.token_id)
+                        .map(|mid| (p.token_id.clone(), mid))
+                })
+                .collect();
+            if !prices.is_empty() {
+                self.ledger.positions.mark_all_to_market(&prices);
+            }
+        }
 
         self.heartbeat_count += 1;
         if self.heartbeat_count % 6 == 0 {
