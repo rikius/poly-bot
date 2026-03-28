@@ -146,7 +146,7 @@ impl Bot {
     ) -> Self {
         let config = Arc::new(config);
         let order_book_state = Arc::new(OrderBookState::new());
-        let ledger = Arc::new(Ledger::new(config.max_bet_usd));
+        let ledger = Arc::new(Ledger::new(config.initial_cash_usd));
 
         // Collect condition IDs before consuming market_pairs
         let condition_ids: Vec<String> = market_pairs.iter()
@@ -558,6 +558,24 @@ impl Bot {
         );
         self.total_messages = 0;
 
+        // Mark all open positions to market so unrealized_pnl stays current.
+        {
+            let prices: Vec<(String, Decimal)> = self
+                .ledger
+                .positions
+                .all_positions()
+                .iter()
+                .filter_map(|p| {
+                    self.order_book_state
+                        .mid_price(&p.token_id)
+                        .map(|mid| (p.token_id.clone(), mid))
+                })
+                .collect();
+            if !prices.is_empty() {
+                self.ledger.positions.mark_all_to_market(&prices);
+            }
+        }
+
         self.heartbeat_count += 1;
         if self.heartbeat_count % 6 == 0 {
             // Log latency summary every 60s then reset for the next window
@@ -668,6 +686,22 @@ impl Bot {
                 required,
                 label,
             );
+
+            // Log top-3 book depth so we can see if real orders exist below protective 0.990
+            let (yes_bids, yes_asks) = self.order_book_state.top_levels(&pair.yes_token_id, 3);
+            let (no_bids, no_asks) = self.order_book_state.top_levels(&pair.no_token_id, 3);
+            let fmt_levels = |levels: &[(Decimal, Decimal)]| -> String {
+                levels.iter().map(|(p, s)| format!("{:.3}x{:.0}", p, s)).collect::<Vec<_>>().join(" ")
+            };
+            debug!(
+                "  YES bids=[{}] asks=[{}]",
+                fmt_levels(&yes_bids), fmt_levels(&yes_asks),
+            );
+            debug!(
+                "  NO  bids=[{}] asks=[{}]",
+                fmt_levels(&no_bids), fmt_levels(&no_asks),
+            );
+
             any_logged = true;
         }
 

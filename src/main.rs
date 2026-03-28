@@ -28,6 +28,10 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("polymarket_bot=info".parse()?)
+                // Suppress the SDK's internal ws::connection ERROR logs for
+                // ResetWithoutClosingHandshake — these are normal TCP resets from
+                // the server and are already handled by our reconnect loops.
+                .add_directive("polymarket_client_sdk::ws::connection=off".parse()?)
                 .add_directive("info".parse()?),
         )
         .init();
@@ -54,6 +58,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Configuration loaded successfully");
     info!("  Wallet: {}", config.wallet_address.as_deref().unwrap_or("(none - paper mode)"));
     info!("  Mode: {:?}", config.mode);
+    info!("  Initial cash: ${}", config.initial_cash_usd);
     info!("  Max bet: ${}", config.max_bet_usd);
     info!("  Max daily loss: ${}", config.max_daily_loss_usd);
 
