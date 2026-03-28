@@ -266,6 +266,35 @@ impl Bot {
                 .await
                 .expect("Failed to authenticate CLOB client");
 
+            // Validate L2 credentials immediately — authenticate() stores them without a
+            // server round-trip, so wrong credentials would only surface at the first API
+            // call (cancel-all, post-order, etc.) and produce a confusing 401 at runtime.
+            match clob_client.api_keys().await {
+                Ok(_keys) => {
+                    info!(
+                        api_key = %config.api_key.as_deref().unwrap_or("?"),
+                        "L2 credentials validated"
+                    );
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("401") || msg.contains("Unauthorized") || msg.contains("Invalid api key") {
+                        panic!(
+                            "L2 credential validation failed (401 Unauthorized). \
+                             Check POLYMARKET_API_KEY / POLYMARKET_SECRET / POLYMARKET_PASSPHRASE. \
+                             These must match the API key derived from your PRIVATE_KEY. \
+                             Run `derive_api_key` or re-create your credentials. Error: {msg}"
+                        );
+                    }
+                    // Non-auth errors (network, timeout) are non-fatal — proceed and let
+                    // the executor surface the error when it first submits an order.
+                    warn!(
+                        error = %msg,
+                        "Could not validate L2 credentials at startup (non-auth error); proceeding"
+                    );
+                }
+            }
+
             // Use DualPolicy: Taker for Immediate/Normal, Maker for Passive
             let policy = Arc::new(
                 DualPolicy::new()

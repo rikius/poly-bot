@@ -515,7 +515,16 @@ impl OrderExecutor {
                 count
             }
             Err(e) => {
-                error!(error = %e, "Bulk cancel-all failed");
+                let msg = e.to_string();
+                if msg.contains("401") || msg.contains("Unauthorized") {
+                    error!(
+                        error = %msg,
+                        "Bulk cancel-all failed: 401 Unauthorized — L2 credentials are invalid. \
+                         Check POLYMARKET_API_KEY / POLYMARKET_SECRET / POLYMARKET_PASSPHRASE."
+                    );
+                } else {
+                    error!(error = %msg, "Bulk cancel-all failed");
+                }
                 0
             }
         }
