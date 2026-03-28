@@ -18,14 +18,17 @@
 use crate::config::{Config, OperatingMode};
 use crate::execution::{DualPolicy, ExecutionResult, ExecutionStatus, OrderExecutor, OrderTracker};
 use crate::kill_switch::KillSwitch;
-use crate::ledger::Ledger;
+use crate::ledger::{Fill, Ledger};
 use crate::risk::CircuitBreaker;
 use crate::state::OrderBookState;
 use crate::strategy::{
     MarketPair, MarketPairRegistry, MathArbStrategy, OrderIntent, StrategyContext, StrategyRouter,
 };
 use crate::websocket::{MarketMessage, MarketWebSocket, UserMessage, UserWebSocket};
+use crate::websocket::types::Side;
 use alloy_signer_local::PrivateKeySigner;
+use chrono::Utc;
+use rust_decimal::Decimal;
 use polymarket_client_sdk::auth::{Credentials, Signer as _};
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::POLYGON;
@@ -539,11 +542,6 @@ impl Bot {
         // Check operating mode
         match self.config.mode {
             OperatingMode::Paper => {
-                info!(
-                    "📋 PAPER MODE: Would execute {} order(s) - not submitting",
-                    intents.len()
-                );
-                // In paper mode, we just log what would happen
                 for intent in &intents {
                     info!(
                         "  [PAPER] {} {} @ ${:.4} x {}",
@@ -553,6 +551,7 @@ impl Bot {
                         intent.size
                     );
                 }
+                self.simulate_paper_fills(&intents);
             }
             OperatingMode::Live => {
                 let Some(ref executor) = self.executor else {
@@ -570,6 +569,97 @@ impl Bot {
 
                 self.total_executions += intents.len() as u64;
             }
+        }
+    }
+
+    /// Simulate order fills in paper mode against the live order book.
+    ///
+    /// For each intent:
+    /// - BUY: fills at the current best ask if ask ≤ limit price
+    /// - SELL: fills at the current best bid if bid ≥ limit price
+    ///
+    /// On a successful simulated fill, the ledger is updated exactly as it
+    /// would be for a real fill (positions, cash, slippage, fees).
+    ///
+    /// Cash handling for BUY fills: because paper orders skip the normal
+    /// reserve → settle cycle, the notional is withdrawn directly from
+    /// `available`; the fee is then deducted by `process_fill`.
+    fn simulate_paper_fills(&self, intents: &[OrderIntent]) {
+        for intent in intents {
+            // Determine fill price from the counterside of the book
+            let fill_price = match intent.side {
+                Side::Buy => self
+                    .order_book_state
+                    .best_ask(&intent.token_id)
+                    .filter(|&ask| ask <= intent.price),
+                Side::Sell => self
+                    .order_book_state
+                    .best_bid(&intent.token_id)
+                    .filter(|&bid| bid >= intent.price),
+            };
+
+            let Some(fill_price) = fill_price else {
+                debug!(
+                    side = ?intent.side,
+                    token = %&intent.token_id[..intent.token_id.len().min(12)],
+                    limit = %intent.price,
+                    "Paper: no counterside at limit price, no fill"
+                );
+                continue;
+            };
+
+            let notional = fill_price * intent.size;
+
+            // Fee rate from the market pair registry (15-min crypto = 1000 bps = 10%)
+            let fee_rate_bps = self
+                .market_registry
+                .get_by_token(&intent.token_id)
+                .map(|p| p.fee_rate_bps)
+                .unwrap_or(0);
+            let fee = notional * Decimal::new(fee_rate_bps as i64, 4);
+
+            // For BUY: pre-deduct notional from available so that process_fill's
+            // settle_buy (which drains reserved, not available) doesn't double-count.
+            if intent.side == Side::Buy {
+                let total_cost = notional + fee;
+                if !self.ledger.cash.can_afford(total_cost) {
+                    warn!(
+                        token = %&intent.token_id[..intent.token_id.len().min(12)],
+                        needed = %total_cost,
+                        available = %self.ledger.cash.available(),
+                        "Paper: insufficient cash, skipping fill"
+                    );
+                    continue;
+                }
+                // Withdraw notional; fee will be deducted by process_fill.
+                let _ = self.ledger.cash.withdraw(notional);
+            }
+
+            let fill = Fill {
+                fill_id: format!("paper_{}", Uuid::new_v4()),
+                order_id: format!("paper_{}", Uuid::new_v4()),
+                token_id: intent.token_id.clone(),
+                side: intent.side,
+                price: fill_price,
+                size: intent.size,
+                fee,
+                // expected_price lets process_fill compute slippage against limit
+                expected_price: Some(intent.price),
+                slippage_cost: Decimal::ZERO,
+                timestamp: Utc::now(),
+            };
+
+            info!(
+                side = ?fill.side,
+                token = %&fill.token_id[..fill.token_id.len().min(12)],
+                fill_price = %fill_price,
+                limit_price = %intent.price,
+                size = %fill.size,
+                fee = %fee,
+                "Paper fill simulated"
+            );
+
+            self.ledger.process_fill(fill);
         }
     }
 
