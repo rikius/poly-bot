@@ -542,6 +542,10 @@ impl Bot {
         // Check operating mode
         match self.config.mode {
             OperatingMode::Paper => {
+                info!(
+                    "📋 PAPER MODE: Simulating {} order(s)",
+                    intents.len()
+                );
                 for intent in &intents {
                     info!(
                         "  [PAPER] {} {} @ ${:.4} x {}",
