@@ -558,6 +558,20 @@ impl Bot {
         );
         self.total_messages = 0;
 
+        // Log per-strategy evaluation counts then reset for the next window
+        let eval_counts = self.strategy_router.evaluation_counts();
+        if !eval_counts.is_empty() {
+            let mut sorted: Vec<_> = eval_counts.iter().collect();
+            sorted.sort_by_key(|(name, _)| name.as_str());
+            for (name, (evals, intents)) in &sorted {
+                info!(
+                    "  Strategy [{}]: {} evals, {} intents generated (last 10s)",
+                    name, evals, intents
+                );
+            }
+            self.strategy_router.reset_evaluation_counts();
+        }
+
         // Mark all open positions to market so unrealized_pnl stays current.
         {
             let prices: Vec<(String, Decimal)> = self

@@ -7,6 +7,7 @@ use crate::websocket::types::{ConditionId, TokenId};
 use crate::ledger::Fill;
 use crate::strategy::traits::{OrderIntent, Strategy, StrategyContext};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info};
 
@@ -18,6 +19,10 @@ struct RegisteredStrategy {
     enabled: bool,
     /// Markets this strategy is subscribed to (empty = all)
     subscribed_markets: HashSet<ConditionId>,
+    /// Number of times this strategy has been evaluated (for diagnostics)
+    eval_count: AtomicU64,
+    /// Number of intents generated across all evaluations
+    intent_count: AtomicU64,
 }
 
 /// Routes market events to subscribed strategies
@@ -69,6 +74,8 @@ impl StrategyRouter {
                 strategy,
                 enabled: true,
                 subscribed_markets: subscribed,
+                eval_count: AtomicU64::new(0),
+                intent_count: AtomicU64::new(0),
             },
         );
 
@@ -127,6 +134,33 @@ impl StrategyRouter {
         self.strategies.read().unwrap().keys().cloned().collect()
     }
 
+    /// Returns (eval_count, intent_count) per strategy since last reset
+    pub fn evaluation_counts(&self) -> HashMap<String, (u64, u64)> {
+        self.strategies
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(name, reg)| {
+                (
+                    name.clone(),
+                    (
+                        reg.eval_count.load(Ordering::Relaxed),
+                        reg.intent_count.load(Ordering::Relaxed),
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    /// Reset per-strategy evaluation and intent counters
+    pub fn reset_evaluation_counts(&self) {
+        let strategies = self.strategies.read().unwrap();
+        for reg in strategies.values() {
+            reg.eval_count.store(0, Ordering::Relaxed);
+            reg.intent_count.store(0, Ordering::Relaxed);
+        }
+    }
+
     /// Route a book update to subscribed strategies
     ///
     /// Returns all order intents from all strategies, sorted by priority.
@@ -153,15 +187,21 @@ impl StrategyRouter {
             }
 
             // Get intents from this strategy
+            debug!(strategy = %name, market = %market_id, "Evaluating strategy");
+            reg.eval_count.fetch_add(1, Ordering::Relaxed);
+
             let intents = reg.strategy.on_book_update(market_id, token_id, ctx);
 
             if !intents.is_empty() {
+                reg.intent_count.fetch_add(intents.len() as u64, Ordering::Relaxed);
                 debug!(
                     strategy = %name,
                     market = %market_id,
                     intents = intents.len(),
                     "Strategy generated intents"
                 );
+            } else {
+                debug!(strategy = %name, market = %market_id, "Strategy returned no intents");
             }
 
             all_intents.extend(intents);

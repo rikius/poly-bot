@@ -243,9 +243,13 @@ impl MathArbStrategy {
         // Check exposure limit
         let total_notional = (yes_ask + no_ask) * trade_size;
         if !self.check_exposure_limit(total_notional) {
+            let current = *self.current_exposure.read().unwrap();
             debug!(
                 market = %pair.condition_id,
-                "Exposure limit would be exceeded"
+                current_exposure = %current,
+                additional = %total_notional,
+                max = %self.config.max_total_exposure,
+                "Skipping: exposure limit would be exceeded"
             );
             return None;
         }
@@ -357,6 +361,11 @@ impl Strategy for MathArbStrategy {
 
         // Check cooldown
         if self.is_on_cooldown(market_id) {
+            debug!(
+                market = %market_id,
+                cooldown_ms = self.config.cooldown_ms,
+                "Skipping evaluation: market on cooldown"
+            );
             return vec![];
         }
 
