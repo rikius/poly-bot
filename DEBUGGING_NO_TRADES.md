@@ -77,18 +77,36 @@ This is why the markets in your logs don't trade - they're at $1.01 to $1.02, wh
 
 ---
 
-## Current Behavior (CORRECT)
+## Current Behavior (FIXED ✅)
 
-✅ **Bot IS working correctly:**
+**CRITICAL FIX APPLIED (commit a878360):**
+The order book was picking WRONG ask prices! The SDK delivers asks unsorted, and the code was using `asks.first()` which picked the first element, not the best (lowest) ask. This has been FIXED by explicitly sorting on ingestion:
 
-1. **Market WebSocket** - Receiving real-time order book updates (80+ msgs/sec in your logs)
-2. **Book State** - Storing the LATEST ask prices from WebSocket
-3. **Strategy Evaluation** - Running on EVERY book update (not just every 60s)
-4. **Edge Calculation** - Computing `edge = 1.00 - (YES_ask + NO_ask)` correctly
-5. **Fee Adjustment** - Properly subtracting 10% fees from edge
-6. **Decision** - Correctly rejecting trades when edge < required_edge
+```rust
+// Sort asks ascending (best ask = lowest price first)  ← FIXED!
+asks.sort_by(|a, b| {
+    let pa = a.price.parse::<Decimal>().unwrap_or(Decimal::MAX);
+    let pb = b.price.parse::<Decimal>().unwrap_or(Decimal::MAX);
+    pa.cmp(&pb)
+});
+```
 
-**The bot is NOT stuck with stale prices** - it's using live WebSocket data.
+**Before:** Bot was using protective orders (0.99) instead of real best asks
+**After:** Bot correctly uses the lowest ask price from the order book
+
+---
+
+✅ **Bot IS working correctly (with rebased code):**
+
+1. **Market WebSocket** - Receiving real-time order book updates
+2. **Book State** - NOW correctly sorts asks ascending to get best (lowest) price
+3. **Best Ask Retrieval** - `asks.first()` now returns correct best ask (FIXED!)
+4. **Strategy Evaluation** - Running on EVERY book update
+5. **Edge Calculation** - Computing `edge = 1.00 - (YES_ask + NO_ask)` with CORRECT prices
+6. **Fee Adjustment** - Properly subtracting fees based on REAL prices
+7. **Decision** - Making correct trade decisions based on ACCURATE price data
+
+**The bot NOW correctly uses real-time prices** - sorted properly!
 
 ---
 
