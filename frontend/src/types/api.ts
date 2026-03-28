@@ -65,6 +65,20 @@ export interface OrderStatsInfo {
   active_count: number;
 }
 
+export interface MarketInfo {
+  condition_id: string;
+  description: string;
+  fee_rate_bps: number;
+  yes_ask: string | null;
+  yes_bid: string | null;
+  no_ask: string | null;
+  no_bid: string | null;
+  combined_ask: string | null;
+  mid_sum: string | null;
+  raw_edge: string | null;
+  status: "tradeable" | "below_min_edge" | "no_arb" | "thin_book" | "no_data";
+}
+
 export interface ControlsInfo {
   trading_paused: boolean;
   max_bet_usd: string;
@@ -89,4 +103,5 @@ export interface WsSnapshot {
   recent_fills: FillInfo[];
   pnl: PnlInfo;
   controls: ControlsInfo;
+  markets: MarketInfo[];
 }

@@ -117,6 +117,7 @@ impl Bot {
         Arc<BotLatency>,
         Arc<ControlState>,
         Option<Arc<OrderExecutor>>,
+        Arc<MarketPairRegistry>,
     ) {
         (
             Arc::clone(&self.ledger),
@@ -125,6 +126,7 @@ impl Bot {
             Arc::clone(&self.latency),
             Arc::clone(&self.controls),
             self.executor.clone(),
+            Arc::clone(&self.market_registry),
         )
     }
 

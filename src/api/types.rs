@@ -113,6 +113,28 @@ pub struct LatencyInfo {
     pub submit_to_ack: LatencyPointInfo,
 }
 
+/// Per-market snapshot: book prices + arb edge status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketInfo {
+    pub condition_id: String,
+    pub description: String,
+    pub fee_rate_bps: u32,
+    /// Best ask for the YES/UP token (price to buy YES)
+    pub yes_ask: Option<String>,
+    pub yes_bid: Option<String>,
+    /// Best ask for the NO/DOWN token (price to buy NO)
+    pub no_ask: Option<String>,
+    pub no_bid: Option<String>,
+    /// YES_ask + NO_ask — arb if this is < 1.0
+    pub combined_ask: Option<String>,
+    /// (YES_mid + NO_mid) — reflects true probability sum, should be ≈1 in efficient market
+    pub mid_sum: Option<String>,
+    /// 1 - combined_ask  (negative = no arb)
+    pub raw_edge: Option<String>,
+    /// Human-readable status: "tradeable" | "below_min_edge" | "no_arb" | "thin_book" | "no_data"
+    pub status: String,
+}
+
 /// Runtime-configurable controls broadcast in every snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlsInfo {
@@ -144,4 +166,5 @@ pub struct WsSnapshot {
     pub pnl: PnlInfo,
     pub latency: LatencyInfo,
     pub controls: ControlsInfo,
+    pub markets: Vec<MarketInfo>,
 }

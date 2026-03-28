@@ -4,6 +4,7 @@ import { Portfolio } from "./components/Portfolio";
 import { Positions, ActiveOrders } from "./components/ActiveTrades";
 import { FillHistory } from "./components/FillHistory";
 import { Controls } from "./components/Controls";
+import { Markets } from "./components/Markets";
 
 export function App() {
   const { snapshot, status, lastUpdated } = useWebSocket();
@@ -30,6 +31,7 @@ export function App() {
       ) : (
         <main className="main-content">
           <Controls controls={snapshot.controls} />
+          <Markets markets={snapshot.markets} />
           <Portfolio
             cash={snapshot.cash}
             pnl={snapshot.pnl}

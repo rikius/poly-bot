@@ -34,6 +34,7 @@ use crate::execution::OrderExecutor;
 use crate::ledger::{orders::OrderState, positions::Fill, Ledger};
 use crate::metrics::{BotLatency, PrometheusHandle};
 use crate::state::OrderBookState;
+use crate::strategy::MarketPairRegistry;
 use crate::websocket::types::Side;
 
 use super::types::*;
@@ -51,6 +52,8 @@ pub struct ApiState {
     pub controls: Arc<ControlState>,
     /// Live order executor — None in paper-mode without credentials.
     pub executor: Option<Arc<OrderExecutor>>,
+    /// Market pair registry for edge diagnostics in the snapshot.
+    pub market_registry: Arc<MarketPairRegistry>,
 }
 
 impl ApiState {
@@ -62,6 +65,7 @@ impl ApiState {
         prometheus: PrometheusHandle,
         controls: Arc<ControlState>,
         executor: Option<Arc<OrderExecutor>>,
+        market_registry: Arc<MarketPairRegistry>,
     ) -> Self {
         Self {
             ledger,
@@ -72,6 +76,7 @@ impl ApiState {
             prometheus,
             controls,
             executor,
+            market_registry,
         }
     }
 
@@ -264,6 +269,9 @@ impl ApiState {
         };
         drop(rc);
 
+        // Markets — per-pair book state + edge diagnostics
+        let markets = self.build_markets();
+
         WsSnapshot {
             msg_type: "snapshot".to_string(),
             timestamp: Utc::now().to_rfc3339(),
@@ -276,7 +284,62 @@ impl ApiState {
             pnl,
             latency,
             controls,
+            markets,
         }
+    }
+
+    fn build_markets(&self) -> Vec<MarketInfo> {
+        use rust_decimal::Decimal;
+        use rust_decimal_macros::dec;
+
+        let taker_min_edge = dec!(0.03);
+
+        self.market_registry
+            .all_pairs()
+            .into_iter()
+            .map(|pair| {
+                let yes_ask = self.order_book_state.best_ask(&pair.yes_token_id);
+                let yes_bid = self.order_book_state.best_bid(&pair.yes_token_id);
+                let no_ask  = self.order_book_state.best_ask(&pair.no_token_id);
+                let no_bid  = self.order_book_state.best_bid(&pair.no_token_id);
+
+                let combined = yes_ask.zip(no_ask).map(|(ya, na)| ya + na);
+                let mid_sum  = yes_ask.zip(yes_bid).zip(no_ask.zip(no_bid))
+                    .map(|((ya, yb), (na, nb))| {
+                        let ym = (ya + yb) / dec!(2);
+                        let nm = (na + nb) / dec!(2);
+                        ym + nm
+                    });
+                let raw_edge = combined.map(|c| Decimal::ONE - c);
+
+                let status = match (yes_ask, no_ask, combined, raw_edge) {
+                    (None, _, _, _) | (_, None, _, _) => "no_data",
+                    (_, _, Some(c), _) if c > dec!(1.5) => "thin_book",
+                    (_, _, Some(c), _) if c >= Decimal::ONE => "no_arb",
+                    (_, _, _, Some(e)) => {
+                        let fee_rate = Decimal::from(pair.fee_rate_bps) / dec!(10000);
+                        let fee_cost = fee_rate * combined.unwrap_or(Decimal::ONE);
+                        let required = fee_cost + taker_min_edge;
+                        if e >= required { "tradeable" } else { "below_min_edge" }
+                    }
+                    _ => "no_data",
+                };
+
+                MarketInfo {
+                    condition_id: pair.condition_id.clone(),
+                    description: pair.description.clone(),
+                    fee_rate_bps: pair.fee_rate_bps,
+                    yes_ask: yes_ask.map(|v| format!("{:.3}", v)),
+                    yes_bid: yes_bid.map(|v| format!("{:.3}", v)),
+                    no_ask:  no_ask.map(|v| format!("{:.3}", v)),
+                    no_bid:  no_bid.map(|v| format!("{:.3}", v)),
+                    combined_ask: combined.map(|v| format!("{:.3}", v)),
+                    mid_sum: mid_sum.map(|v| format!("{:.3}", v)),
+                    raw_edge: raw_edge.map(|v| format!("{:+.4}", v)),
+                    status: status.to_string(),
+                }
+            })
+            .collect()
     }
 }
 
