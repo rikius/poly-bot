@@ -6,7 +6,9 @@
 use crate::websocket::types::{Side, TokenId};
 use crate::constants::*;
 use crate::ledger::Ledger;
+use crate::strategy::market_pair::MarketPairRegistry;
 use rust_decimal::Decimal;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 use tracing::error;
@@ -256,7 +258,7 @@ impl RiskLimits {
     }
 
     /// Check all limits against current ledger state
-    pub fn check_all(&self, ledger: &Ledger) -> Vec<LimitViolation> {
+    pub fn check_all(&self, ledger: &Ledger, registry: Option<&MarketPairRegistry>) -> Vec<LimitViolation> {
         let mut violations = Vec::new();
 
         // Check daily loss
@@ -278,7 +280,7 @@ impl RiskLimits {
         }
 
         // Check unhedged exposure
-        let unhedged = self.calculate_unhedged_exposure(ledger);
+        let unhedged = self.calculate_unhedged_exposure(ledger, registry);
         if unhedged > self.config.max_unhedged_exposure {
             violations.push(LimitViolation::MaxUnhedgedExposureExceeded {
                 current: unhedged,
@@ -291,17 +293,57 @@ impl RiskLimits {
 
     /// Calculate unhedged directional exposure
     ///
-    /// For binary markets (YES/NO), a hedged position has equal YES and NO.
-    /// Unhedged exposure is the net directional bet.
-    pub fn calculate_unhedged_exposure(&self, ledger: &Ledger) -> Decimal {
+    /// For binary markets (YES/NO or Up/Down), a perfectly hedged position has
+    /// equal notional on both legs. Unhedged exposure per market pair is:
+    ///
+    ///   |yes_notional - no_notional|
+    ///
+    /// When registry is `None` (not yet initialised), falls back to summing all
+    /// absolute position notionals — a conservative over-estimate that keeps
+    /// trading safe during startup.
+    pub fn calculate_unhedged_exposure(
+        &self,
+        ledger: &Ledger,
+        registry: Option<&MarketPairRegistry>,
+    ) -> Decimal {
         let snapshot = ledger.snapshot();
-        let mut total_unhedged = Decimal::ZERO;
 
-        // Group positions by market (simplified - assumes token IDs can be paired)
-        // For now, sum absolute values of all positions
+        let Some(registry) = registry else {
+            // Conservative fallback: sum all absolute position notionals
+            return snapshot
+                .positions
+                .iter()
+                .map(|pos| pos.shares.abs() * pos.avg_cost)
+                .fold(Decimal::ZERO, |acc, v| acc + v);
+        };
+
+        let mut total_unhedged = Decimal::ZERO;
+        // Track which condition IDs we've already accounted for
+        let mut seen: HashSet<String> = HashSet::new();
+
         for pos in &snapshot.positions {
-            let exposure = pos.shares.abs() * pos.avg_cost;
-            total_unhedged += exposure;
+            if let Some(pair) = registry.get_by_token(&pos.token_id) {
+                if !seen.insert(pair.condition_id.clone()) {
+                    // Already processed this market pair via its complement
+                    continue;
+                }
+
+                // Find the paired position (complement token)
+                let complement_id = pair.complement(&pos.token_id).cloned();
+                let complement_notional = complement_id
+                    .and_then(|cid| {
+                        snapshot.positions.iter().find(|p| p.token_id == cid)
+                    })
+                    .map(|p| p.shares.abs() * p.avg_cost)
+                    .unwrap_or(Decimal::ZERO);
+
+                let this_notional = pos.shares.abs() * pos.avg_cost;
+                // Net directional exposure for this market pair
+                total_unhedged += (this_notional - complement_notional).abs();
+            } else {
+                // Token not registered in any pair — treat as fully unhedged
+                total_unhedged += pos.shares.abs() * pos.avg_cost;
+            }
         }
 
         total_unhedged

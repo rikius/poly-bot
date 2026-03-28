@@ -137,15 +137,29 @@ impl ReconciliationLoop {
 
     /// Run a single reconciliation check
     pub async fn reconcile_once(&self) -> Result<ReconciliationResult, String> {
-        // Fetch server orders via SDK (first page, default request = all orders)
-        let request = OrdersRequest::default();
-        let page = self
-            .clob_client
-            .orders(&request, None)
-            .await
-            .map_err(|e| format!("Failed to fetch orders: {}", e))?;
+        // Fetch ALL server orders by paginating until the cursor is exhausted.
+        // The API returns at most ~500 orders per page; a cursor of "LTE=" signals
+        // the last page (base64 for "<=", Polymarket's sentinel value).
+        let mut server_orders = Vec::new();
+        let mut cursor: Option<String> = None;
 
-        let server_orders = page.data;
+        loop {
+            let request = OrdersRequest::default();
+            let page = self
+                .clob_client
+                .orders(&request, cursor.clone())
+                .await
+                .map_err(|e| format!("Failed to fetch orders: {}", e))?;
+
+            server_orders.extend(page.data);
+
+            // Stop when the cursor is empty or the terminal sentinel ("LTE=" = base64 "<=")
+            if page.next_cursor.is_empty() || page.next_cursor == "LTE=" {
+                break;
+            }
+            cursor = Some(page.next_cursor);
+        }
+
         let server_order_count = server_orders.len();
 
         // Get local orders

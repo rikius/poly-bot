@@ -11,9 +11,11 @@
 
 use std::str::FromStr as _;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use alloy_signer_local::PrivateKeySigner;
+use futures_util::future::join_all;
 use polymarket_client_sdk::auth::Normal;
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::clob::Client as ClobClient;
@@ -23,14 +25,15 @@ use polymarket_client_sdk::clob::types::{
 };
 use polymarket_client_sdk::clob::types::response::PostOrderResponse;
 use polymarket_client_sdk::types::U256;
+use rust_decimal::Decimal;
 
-use crate::websocket::types::OrderType;
+use crate::constants::PARTIAL_FILL_UNWIND_MS;
 use crate::error::ErrorType;
-use crate::execution::policy::{ExecutionPolicy, IntentRef, OrderParams, PartialFillAction};
+use crate::execution::policy::{ExecutionPolicy, IntentRef, OrderParams};
 use crate::risk::circuit_breaker::CircuitBreaker;
 use crate::risk::rate_limiter::RateLimiter;
-use crate::strategy::OrderIntent;
-use rust_decimal::Decimal;
+use crate::strategy::{OrderIntent, Urgency};
+use crate::websocket::types::{OrderType, Side};
 
 
 // ============================================================================
@@ -226,71 +229,121 @@ impl OrderExecutor {
                 vec![r1, r2, r3]
             }
             _ => {
-                // For larger batches, execute sequentially
-                let mut results = Vec::with_capacity(intents.len());
-                for intent in intents {
-                    results.push(self.execute(intent).await);
-                }
-                results
+                // For arbitrary batch sizes run all concurrently
+                join_all(intents.iter().map(|i| self.execute(i))).await
             }
         }
     }
 
-    /// Execute a grouped set of intents and handle partial fills
+    /// Execute a grouped set of intents and handle partial fills.
     ///
-    /// For grouped orders (like arb legs), we need to ensure both legs
-    /// fill equally. If they don't, the policy determines how to handle it.
+    /// For multi-leg arb orders all legs must stay balanced. After concurrent
+    /// submission we compare filled amounts:
+    ///
+    /// - If every leg filled equally → nothing to do
+    /// - If some legs filled more than others → unwind the excess on the
+    ///   over-filled legs so positions stay delta-neutral
+    ///
+    /// The unwind attempt runs within `PARTIAL_FILL_UNWIND_MS` milliseconds.
     pub async fn execute_grouped(&self, intents: &[OrderIntent]) -> Vec<ExecutionResult> {
-        // First, submit all orders concurrently
+        if intents.is_empty() {
+            return vec![];
+        }
+
+        // Submit all legs concurrently
         let results = self.execute_batch(intents).await;
 
-        // Check if any need partial fill handling
-        let group_id = intents.first().and_then(|i| i.group_id.clone());
-        if group_id.is_none() {
+        // Only groups need balancing
+        if intents.first().and_then(|i| i.group_id.as_ref()).is_none() {
             return results;
         }
 
-        // Collect indices of filled orders
-        let filled_indices: Vec<usize> = results
+        // Minimum filled across all legs – the balanced target
+        let min_filled: Decimal = results
             .iter()
-            .enumerate()
-            .filter(|(_, r)| r.filled && r.filled_size > Decimal::ZERO)
-            .map(|(i, _)| i)
+            .map(|r| r.filled_size)
+            .fold(Decimal::MAX, |m, s| m.min(s));
+
+        // Build unwind intents for any leg that exceeded the minimum
+        let unwind_intents: Vec<OrderIntent> = results
+            .iter()
+            .zip(intents.iter())
+            .filter_map(|(result, original)| {
+                let excess = result.filled_size - min_filled;
+                if excess <= Decimal::ZERO {
+                    return None;
+                }
+
+                // Inverse side to close the excess position
+                let unwind_side = match original.side {
+                    Side::Buy => Side::Sell,
+                    Side::Sell => Side::Buy,
+                };
+
+                // Aggressive limit price so the order fills against any
+                // available counter-party (FAK semantics via Immediate urgency)
+                let limit_price = match unwind_side {
+                    Side::Sell => Decimal::new(1, 2),   // 0.01 – sell at any bid
+                    Side::Buy  => Decimal::new(99, 2),  // 0.99 – buy at any ask
+                };
+
+                info!(
+                    token    = %original.token_id,
+                    excess   = %excess,
+                    side     = ?unwind_side,
+                    "Unwinding excess fill from grouped order"
+                );
+
+                Some(OrderIntent::new(
+                    original.market_id.clone(),
+                    original.token_id.clone(),
+                    unwind_side,
+                    limit_price,
+                    excess,
+                    Urgency::Immediate,
+                    "unwind: partial fill imbalance",
+                    format!("unwind:{}", original.strategy_name),
+                ))
+            })
             .collect();
 
-        let unfilled_count = results.len() - filled_indices.len();
-
-        // If all filled or all unfilled, nothing to do
-        if filled_indices.is_empty() || unfilled_count == 0 {
+        if unwind_intents.is_empty() {
             return results;
         }
 
-        // Handle imbalanced fills based on policy
-        for idx in filled_indices {
-            let result = &results[idx];
-            if result.filled_size < result.requested_size {
-                // Partial fill - check policy
-                let intent_ref = IntentRef::from_intent(&intents[idx]);
-                let action = self.policy.on_partial_fill(&intent_ref, result.filled_size);
+        // Run all unwinds within the deadline
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_millis(PARTIAL_FILL_UNWIND_MS);
 
-                match action {
-                    PartialFillAction::UnwindFilled => {
-                        info!(
-                            token = %result.intent_token_id,
-                            filled = %result.filled_size,
-                            "Unwinding partial fill for grouped order"
-                        );
-                        // TODO: Submit unwind order
-                        // For now, just log - actual unwind requires inverse order
-                    }
-                    PartialFillAction::CancelRemainder => {
-                        // FAK already does this
-                        debug!(token = %result.intent_token_id, "Cancelling remainder");
-                    }
-                    PartialFillAction::KeepRemainder => {
-                        // GTC keeps working
-                        debug!(token = %result.intent_token_id, "Keeping remainder on book");
-                    }
+        for unwind in &unwind_intents {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                warn!(
+                    token = %unwind.token_id,
+                    "Unwind deadline exceeded – residual exposure remains"
+                );
+                break;
+            }
+
+            match tokio::time::timeout(remaining, self.execute(unwind)).await {
+                Ok(r) if r.status == ExecutionStatus::FullyFilled => {
+                    info!(token = %unwind.token_id, "Unwind fully filled");
+                }
+                Ok(r) => {
+                    warn!(
+                        token    = %unwind.token_id,
+                        status   = ?r.status,
+                        excess   = %unwind.size,
+                        filled   = %r.filled_size,
+                        "Unwind did not fully fill – residual exposure remains"
+                    );
+                }
+                Err(_) => {
+                    warn!(
+                        token  = %unwind.token_id,
+                        budget = ?Duration::from_millis(PARTIAL_FILL_UNWIND_MS),
+                        "Unwind timed out"
+                    );
                 }
             }
         }
