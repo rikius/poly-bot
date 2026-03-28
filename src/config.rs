@@ -34,6 +34,8 @@ pub struct Config {
     pub maker_price_offset: Decimal,
     /// TTL for maker orders before cancellation (seconds)
     pub maker_order_ttl_secs: u64,
+    /// Enable MakerRebateArbStrategy (passive GTC arb with rebate capture)
+    pub maker_rebate_enabled: bool,
 }
 
 /// Operating mode for the bot
@@ -111,6 +113,9 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(120); // 2 minutes default
+        let maker_rebate_enabled = std::env::var("MAKER_REBATE_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
 
         Ok(Config {
             api_key,
@@ -128,6 +133,7 @@ impl Config {
             use_maker_mode,
             maker_price_offset,
             maker_order_ttl_secs,
+            maker_rebate_enabled,
         })
     }
 

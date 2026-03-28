@@ -23,7 +23,8 @@ use crate::metrics::BotLatency;
 use crate::risk::CircuitBreaker;
 use crate::state::OrderBookState;
 use crate::strategy::{
-    MarketPair, MarketPairRegistry, MathArbStrategy, OrderIntent, StrategyContext, StrategyRouter,
+    MakerRebateArbStrategy, MakerRebateConfig, MarketPair, MarketPairRegistry, MathArbStrategy,
+    OrderIntent, StrategyContext, StrategyRouter,
 };
 use crate::websocket::{MarketMessage, MarketWebSocket, UserMessage, UserWebSocket};
 use crate::websocket::types::Side;
@@ -148,6 +149,25 @@ impl Bot {
         let math_arb = Arc::new(MathArbStrategy::with_config(market_registry.clone(), arb_config));
         if let Err(e) = strategy_router.register(math_arb) {
             warn!("Failed to register MathArbStrategy: {}", e);
+        }
+
+        // Optionally register MakerRebateArbStrategy (MAKER_REBATE_ENABLED=true)
+        if config.maker_rebate_enabled {
+            info!(
+                ttl_secs = config.maker_order_ttl_secs,
+                "Registering MakerRebateArbStrategy (passive GTC arb, earns maker rebates)"
+            );
+            let rebate_config = MakerRebateConfig {
+                ttl_secs: config.maker_order_ttl_secs,
+                ..MakerRebateConfig::default()
+            };
+            let maker_rebate = Arc::new(MakerRebateArbStrategy::with_config(
+                market_registry.clone(),
+                rebate_config,
+            ));
+            if let Err(e) = strategy_router.register(maker_rebate) {
+                warn!("Failed to register MakerRebateArbStrategy: {}", e);
+            }
         }
 
         // Set up circuit breaker for risk management
