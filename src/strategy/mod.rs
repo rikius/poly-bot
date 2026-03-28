@@ -21,6 +21,7 @@ pub mod edge_calculator;
 pub mod maker_rebate_arb;
 pub mod market_pair;
 pub mod router;
+pub mod temporal_arb;
 pub mod traits;
 
 // Re-export main types
@@ -32,3 +33,4 @@ pub use arbitrage::{MathArbConfig, MathArbStrategy};
 pub use edge_calculator::{EdgeCalculation, EdgeCalculator, EdgeConfig};
 pub use maker_rebate_arb::{MakerRebateArbStrategy, MakerRebateConfig};
 pub use market_pair::{MarketPair, MarketPairRegistry};
+pub use temporal_arb::{TemporalArbConfig, TemporalArbStrategy};

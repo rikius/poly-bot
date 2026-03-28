@@ -70,12 +70,16 @@ pub struct MarketPair {
     
     /// Type of binary outcomes
     pub outcome_type: BinaryOutcomeType,
-    
+
     /// First outcome label (Yes, Up, etc.)
     pub first_outcome_label: String,
-    
-    /// Second outcome label (No, Down, etc.)  
+
+    /// Second outcome label (No, Down, etc.)
     pub second_outcome_label: String,
+
+    /// Underlying asset symbol for price-feed correlation ("BTC", "ETH", "SOL").
+    /// `None` for non-crypto or unknown markets.
+    pub asset_symbol: Option<String>,
 }
 
 impl MarketPair {
@@ -97,6 +101,7 @@ impl MarketPair {
             outcome_type: BinaryOutcomeType::YesNo,
             first_outcome_label: "Yes".to_string(),
             second_outcome_label: "No".to_string(),
+            asset_symbol: None,
         }
     }
     
@@ -118,6 +123,7 @@ impl MarketPair {
             outcome_type: BinaryOutcomeType::UpDown,
             first_outcome_label: "Up".to_string(),
             second_outcome_label: "Down".to_string(),
+            asset_symbol: None,
         }
     }
     
@@ -148,6 +154,7 @@ impl MarketPair {
             outcome_type,
             first_outcome_label: first,
             second_outcome_label: second,
+            asset_symbol: None,
         }
     }
     
@@ -182,6 +189,12 @@ impl MarketPair {
     /// Create with description
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = description.into();
+        self
+    }
+
+    /// Set the underlying asset symbol (e.g., "BTC", "ETH", "SOL").
+    pub fn with_asset_symbol(mut self, symbol: impl Into<String>) -> Self {
+        self.asset_symbol = Some(symbol.into());
         self
     }
 

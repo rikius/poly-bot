@@ -143,15 +143,30 @@ pub struct DiscoveredMarket {
 }
 
 impl DiscoveredMarket {
-    /// Convert to MarketPair for the strategy layer
+    /// Convert to MarketPair for the strategy layer.
+    ///
+    /// Automatically detects the underlying asset symbol ("BTC", "ETH", "SOL")
+    /// from the event slug and question text so that [`TemporalArbStrategy`]
+    /// can correlate this market with an external price feed.
+    ///
+    /// [`TemporalArbStrategy`]: crate::strategy::temporal_arb::TemporalArbStrategy
     pub fn to_market_pair(&self) -> MarketPair {
-        MarketPair::new(
+        let asset_symbol = crate::feeds::binance::detect_asset_from_text(&self.event_slug)
+            .or_else(|| crate::feeds::binance::detect_asset_from_text(&self.question));
+
+        let pair = MarketPair::new(
             self.condition_id.clone(),
             self.first_token_id.clone(),
             self.second_token_id.clone(),
         )
         .with_fee_rate(self.fee_rate_bps)
-        .with_description(&self.question)
+        .with_description(&self.question);
+
+        if let Some(sym) = asset_symbol {
+            pair.with_asset_symbol(sym)
+        } else {
+            pair
+        }
     }
 }
 

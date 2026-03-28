@@ -17,6 +17,7 @@ pub mod config;
 pub mod constants;
 pub mod error;
 pub mod execution;
+pub mod feeds;
 pub mod kill_switch;
 pub mod latency;
 pub mod ledger;

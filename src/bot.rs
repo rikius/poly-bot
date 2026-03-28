@@ -17,6 +17,8 @@
 
 use crate::config::{Config, OperatingMode};
 use crate::execution::{DualPolicy, ExecutionResult, ExecutionStatus, OrderExecutor, OrderTracker};
+use crate::feeds::{new_price_store, ExternalPriceStore};
+use crate::feeds::binance::BinanceFeed;
 use crate::kill_switch::KillSwitch;
 use crate::ledger::{Fill, Ledger};
 use crate::metrics::BotLatency;
@@ -24,7 +26,7 @@ use crate::risk::CircuitBreaker;
 use crate::state::OrderBookState;
 use crate::strategy::{
     MakerRebateArbStrategy, MakerRebateConfig, MarketPair, MarketPairRegistry, MathArbStrategy,
-    OrderIntent, StrategyContext, StrategyRouter,
+    OrderIntent, StrategyContext, StrategyRouter, TemporalArbConfig, TemporalArbStrategy,
 };
 use crate::websocket::{MarketMessage, MarketWebSocket, UserMessage, UserWebSocket};
 use crate::websocket::types::Side;
@@ -88,6 +90,8 @@ pub struct Bot {
     latency: Arc<BotLatency>,
     /// Heartbeat tick counter — used to trigger periodic histogram reset (every 6 ticks = 60s)
     heartbeat_count: u32,
+    /// External price store for temporal arb (Binance feed writes here)
+    external_prices: ExternalPriceStore,
 }
 
 impl Bot {
@@ -151,6 +155,9 @@ impl Bot {
             warn!("Failed to register MathArbStrategy: {}", e);
         }
 
+        // Shared external price store (populated by Binance feed when enabled)
+        let external_prices = new_price_store();
+
         // Optionally register MakerRebateArbStrategy (MAKER_REBATE_ENABLED=true)
         if config.maker_rebate_enabled {
             info!(
@@ -170,8 +177,37 @@ impl Bot {
             }
         }
 
+        // Optionally register TemporalArbStrategy + start Binance feed (TEMPORAL_ARB_ENABLED=true)
+        if config.temporal_arb_enabled {
+            info!(
+                threshold_bps = config.temporal_arb_threshold_bps,
+                sensitivity_bps = config.temporal_arb_sensitivity_bps,
+                "Registering TemporalArbStrategy + starting Binance price feed"
+            );
+            let temporal_config = TemporalArbConfig {
+                threshold_bps: config.temporal_arb_threshold_bps,
+                sensitivity_bps: config.temporal_arb_sensitivity_bps,
+                ..TemporalArbConfig::default()
+            };
+            let temporal = Arc::new(TemporalArbStrategy::with_config(
+                market_registry.clone(),
+                Arc::clone(&external_prices),
+                temporal_config,
+            ));
+            if let Err(e) = strategy_router.register(temporal) {
+                warn!("Failed to register TemporalArbStrategy: {}", e);
+            }
+
+            // Spawn Binance WebSocket feed task
+            let feed = BinanceFeed::new(Arc::clone(&external_prices));
+            tokio::spawn(async move {
+                feed.run().await;
+            });
+        }
+
         // Set up circuit breaker for risk management
         let circuit_breaker = Arc::new(CircuitBreaker::new());
+
 
         // Set up order tracker for outstanding orders
         let order_tracker = Arc::new(OrderTracker::new());
@@ -286,6 +322,7 @@ impl Bot {
             total_fills: 0,
             latency,
             heartbeat_count: 0,
+            external_prices,
         }
     }
 

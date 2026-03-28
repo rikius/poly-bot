@@ -36,6 +36,14 @@ pub struct Config {
     pub maker_order_ttl_secs: u64,
     /// Enable MakerRebateArbStrategy (passive GTC arb with rebate capture)
     pub maker_rebate_enabled: bool,
+
+    // Temporal arb configuration
+    /// Enable TemporalArbStrategy (external price feed vs Polymarket)
+    pub temporal_arb_enabled: bool,
+    /// Minimum external price move in bps to trigger temporal arb (default 100)
+    pub temporal_arb_threshold_bps: i64,
+    /// Sensitivity parameter: bps_move / sensitivity → probability shift (default 2000)
+    pub temporal_arb_sensitivity_bps: i64,
 }
 
 /// Operating mode for the bot
@@ -117,6 +125,18 @@ impl Config {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
+        let temporal_arb_enabled = std::env::var("TEMPORAL_ARB_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        let temporal_arb_threshold_bps = std::env::var("TEMPORAL_ARB_THRESHOLD_BPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100i64);
+        let temporal_arb_sensitivity_bps = std::env::var("TEMPORAL_ARB_SENSITIVITY_BPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2000i64);
+
         Ok(Config {
             api_key,
             secret_key: secret_key.map(|s| s.trim_matches('"').to_string()),
@@ -134,6 +154,9 @@ impl Config {
             maker_price_offset,
             maker_order_ttl_secs,
             maker_rebate_enabled,
+            temporal_arb_enabled,
+            temporal_arb_threshold_bps,
+            temporal_arb_sensitivity_bps,
         })
     }
 
