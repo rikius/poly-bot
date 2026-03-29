@@ -30,6 +30,9 @@ serde_json = "1.0"
 # Using the small alloy-signer-local crate (already compiled as SDK transitive dep)
 # instead of the full alloy metapackage.
 alloy-signer-local = "1"
+# Full alloy provider stack for on-chain approval transactions.
+# Already compiled as a transitive SDK dep so this adds no build overhead.
+alloy = { version = "1", features = ["providers", "contract", "reqwest", "reqwest-rustls-tls"] }
 
 # Concurrent data structures
 dashmap = "5.5"

@@ -15,6 +15,7 @@
 //! - Heartbeat for logging (10s)
 //! - Async kill signal for shutdown
 
+mod approvals;
 mod execution;
 mod handlers;
 mod heartbeat;

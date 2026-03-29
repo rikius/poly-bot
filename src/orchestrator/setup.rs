@@ -224,6 +224,11 @@ impl Bot {
 
                 info!(api_key = %creds.key(), "L2 credentials received");
 
+                // Ensure all on-chain approvals are in place (USDC + CTF for all
+                // Polymarket exchange contracts).  Sends transactions only when an
+                // approval is missing, so this is safe to run on every startup.
+                super::approvals::ensure_approvals(signer.clone()).await;
+
                 // Step 1: Tell the CLOB to refresh its on-chain allowance cache.
                 // Without this the API reports balance=0 and rejects every order
                 // even when USDC is present but the allowance cache is stale.
