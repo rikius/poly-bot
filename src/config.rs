@@ -237,11 +237,9 @@ impl Config {
             }
         }
 
-        is_valid(&self.api_key)
-            && is_valid(&self.secret_key)
-            && is_valid(&self.passphrase)
-            && is_valid(&self.private_key)
-            && is_valid(&self.wallet_address)
+        // Credentials are derived from the private key via the Polymarket API —
+        // POLYMARKET_API_KEY / SECRET / PASSPHRASE are no longer required.
+        is_valid(&self.private_key) && is_valid(&self.wallet_address)
     }
 }
 

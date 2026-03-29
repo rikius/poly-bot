@@ -35,7 +35,7 @@ use crate::websocket::types::Side;
 use alloy_signer_local::PrivateKeySigner;
 use chrono::Utc;
 use rust_decimal::Decimal;
-use polymarket_client_sdk::auth::{Credentials, Signer as _};
+use polymarket_client_sdk::auth::Signer as _;
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::POLYGON;
 use std::collections::HashMap;
@@ -250,21 +250,15 @@ impl Bot {
                     .with_chain_id(Some(POLYGON)),
             );
 
-            let api_key = Uuid::parse_str(config.api_key.as_ref().unwrap())
-                .expect("POLYMARKET_API_KEY must be a valid UUID");
-            let sdk_credentials = Credentials::new(
-                api_key,
-                config.secret_key.clone().unwrap(),
-                config.passphrase.clone().unwrap(),
-            );
-
             let clob_client = ClobClient::new(clob_url, ClobConfig::default())
                 .expect("Failed to create CLOB client")
                 .authentication_builder(signer.as_ref())
-                .credentials(sdk_credentials.clone())
                 .authenticate()
                 .await
                 .expect("Failed to authenticate CLOB client");
+
+            // Extract the derived credentials so we can pass them to the user WebSocket.
+            let sdk_credentials = clob_client.credentials().clone();
 
             // Validate L2 credentials immediately — authenticate() stores them without a
             // server round-trip, so wrong credentials would only surface at the first API
@@ -272,8 +266,8 @@ impl Bot {
             match clob_client.api_keys().await {
                 Ok(_keys) => {
                     info!(
-                        api_key = %config.api_key.as_deref().unwrap_or("?"),
-                        "L2 credentials validated"
+                        api_key = %sdk_credentials.key(),
+                        "L2 credentials derived and validated"
                     );
                 }
                 Err(e) => {
@@ -281,9 +275,9 @@ impl Bot {
                     if msg.contains("401") || msg.contains("Unauthorized") || msg.contains("Invalid api key") {
                         panic!(
                             "L2 credential validation failed (401 Unauthorized). \
-                             Check POLYMARKET_API_KEY / POLYMARKET_SECRET / POLYMARKET_PASSPHRASE. \
-                             These must match the API key derived from your PRIVATE_KEY. \
-                             Run `derive_api_key` or re-create your credentials. Error: {msg}"
+                             Credentials were derived from PRIVATE_KEY but rejected by the API. \
+                             Check that PRIVATE_KEY is correct and your wallet is registered on Polymarket. \
+                             Error: {msg}"
                         );
                     }
                     // Non-auth errors (network, timeout) are non-fatal — proceed and let
