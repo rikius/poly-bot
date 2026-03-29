@@ -46,11 +46,15 @@ pub struct MakerRebateConfig {
     /// earn rebates instead of paying fees — default 0.5 cents).
     pub min_edge: Decimal,
 
-    /// Maximum position size per leg (USDC notional).
+    /// Maximum position size per leg (shares).
     pub max_position_size: Decimal,
 
     /// Minimum position size per leg (below this, skip the trade).
     pub min_position_size: Decimal,
+
+    /// Maximum total cost per bet in USD (both legs combined).
+    /// Maps directly to MAX_BET_USD from the global config.
+    pub max_bet_usd: Decimal,
 
     /// Maximum total exposure across all open maker arbs.
     pub max_total_exposure: Decimal,
@@ -68,7 +72,8 @@ impl Default for MakerRebateConfig {
         Self {
             min_edge: dec!(0.005),          // 0.5 cents
             max_position_size: dec!(500),
-            min_position_size: dec!(10),
+            min_position_size: dec!(1),
+            max_bet_usd: dec!(5),           // $5 per bet — overridden from config
             max_total_exposure: dec!(2000),
             cooldown_ms: 5_000,             // 5 s — GTC orders linger
             ttl_secs: 120,                  // matches MAKER_ORDER_TTL default
@@ -234,11 +239,18 @@ impl MakerRebateArbStrategy {
         } else {
             Decimal::ZERO
         };
+        // Cap total cost per bet to max_bet_usd (both legs combined).
+        let max_by_bet = if combined_cost > Decimal::ZERO {
+            self.config.max_bet_usd / combined_cost
+        } else {
+            Decimal::ZERO
+        };
         let trade_size = calc
             .max_size
             .min(self.config.max_position_size)
             .min(max_by_exposure)
             .min(max_by_balance)
+            .min(max_by_bet)
             .max(Decimal::ZERO)
             // Polymarket requires size to have at most 2 decimal places.
             // Truncate (floor) so we never exceed the balance cap.

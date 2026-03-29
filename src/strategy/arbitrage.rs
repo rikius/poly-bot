@@ -33,13 +33,17 @@ pub struct MathArbConfig {
     /// Minimum edge to execute (default: 3 cents for taker)
     pub min_edge: Decimal,
 
-    /// Maximum position size per trade
+    /// Maximum position size per trade (shares).
     pub max_position_size: Decimal,
 
-    /// Minimum position size per trade
+    /// Minimum position size per trade (shares).
     pub min_position_size: Decimal,
 
-    /// Maximum total exposure across all positions
+    /// Maximum total cost per bet in USD (both legs combined).
+    /// Maps directly to MAX_BET_USD from the global config.
+    pub max_bet_usd: Decimal,
+
+    /// Maximum total exposure across all positions.
     pub max_total_exposure: Decimal,
 
     /// Cooldown between trades on same market (ms)
@@ -52,11 +56,12 @@ pub struct MathArbConfig {
 impl Default for MathArbConfig {
     fn default() -> Self {
         Self {
-            min_edge: dec!(0.03),       // 3 cents minimum edge
-            max_position_size: dec!(500), // Max $500 per leg
-            min_position_size: dec!(10),  // Min $10 per leg
-            max_total_exposure: dec!(2000), // Max $2000 total
-            cooldown_ms: 1000,           // 1 second cooldown
+            min_edge: dec!(0.03),
+            max_position_size: dec!(500),
+            min_position_size: dec!(1),
+            max_bet_usd: dec!(5),           // overridden from config
+            max_total_exposure: dec!(2000),
+            cooldown_ms: 1000,
             use_maker_execution: false,
         }
     }
@@ -280,10 +285,17 @@ impl MathArbStrategy {
             Decimal::ZERO
         };
 
+        // Cap total cost per bet to max_bet_usd (both legs combined).
+        let max_by_bet = if combined_ask > Decimal::ZERO {
+            self.config.max_bet_usd / combined_ask
+        } else {
+            Decimal::ZERO
+        };
         let trade_size = max_by_book
             .min(max_by_config)
             .min(max_by_exposure)
             .min(max_by_balance)
+            .min(max_by_bet)
             .max(Decimal::ZERO)
             // Polymarket requires size to have at most 2 decimal places.
             .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero);

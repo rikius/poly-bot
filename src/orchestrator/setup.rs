@@ -163,6 +163,10 @@ impl Bot {
             info!("Using TAKER mode for arb strategy (3% min edge, FOK orders)");
             crate::strategy::MathArbConfig::taker()
         };
+        let arb_config = crate::strategy::MathArbConfig {
+            max_bet_usd: config.max_bet_usd,
+            ..arb_config
+        };
         let math_arb = Arc::new(MathArbStrategy::with_config(market_registry.clone(), arb_config));
         if let Err(e) = strategy_router.register(math_arb) {
             warn!("Failed to register MathArbStrategy: {}", e);
@@ -179,6 +183,7 @@ impl Bot {
             );
             let rebate_config = MakerRebateConfig {
                 ttl_secs: config.maker_order_ttl_secs,
+                max_bet_usd: config.max_bet_usd,
                 ..MakerRebateConfig::default()
             };
             let maker_rebate = Arc::new(MakerRebateArbStrategy::with_config(
