@@ -453,6 +453,7 @@ mod tests {
             urgency,
             strategy_name: "TestStrategy".to_string(),
             group_id,
+            tick_size: Decimal::ZERO,
         }
     }
 
@@ -572,6 +573,7 @@ mod tests {
             urgency: Urgency::Passive,
             strategy_name: "Test".to_string(),
             group_id: None,
+            tick_size: Decimal::ZERO,
         };
 
         let params = policy.to_order_params(&intent);
