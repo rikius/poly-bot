@@ -20,8 +20,6 @@ use alloy_signer_local::PrivateKeySigner;
 use polymarket_client_sdk::auth::{Credentials, Normal};
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::clob::Client as ClobClient;
-use polymarket_client_sdk::clob::types::AssetType;
-use polymarket_client_sdk::clob::types::request::{BalanceAllowanceRequest, UpdateBalanceAllowanceRequest};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -156,36 +154,6 @@ impl Bot {
                     .expect("AuthComponents must be provided when PRIVATE_KEY is set");
 
                 info!(api_key = %creds.key(), "L2 credentials received");
-
-                // Sync ledger cash to the actual Polymarket USDC balance.
-                // The CLOB API caches the on-chain balance; call update first to refresh it.
-                let balance_req = BalanceAllowanceRequest::builder()
-                    .asset_type(AssetType::Collateral)
-                    .build();
-                if let Err(e) = clob_client
-                    .update_balance_allowance(UpdateBalanceAllowanceRequest::builder()
-                        .asset_type(AssetType::Collateral)
-                        .build())
-                    .await
-                {
-                    warn!(error = %e, "Could not trigger balance cache refresh; balance may be stale");
-                }
-                match clob_client.balance_allowance(balance_req).await {
-                    Ok(resp) => {
-                        info!(
-                            balance_usdc = %resp.balance,
-                            "Portfolio balance loaded from Polymarket"
-                        );
-                        ledger.sync_cash(resp.balance);
-                    }
-                    Err(e) => {
-                        warn!(
-                            error = %e,
-                            initial_cash_usd = %config.initial_cash_usd,
-                            "Could not load portfolio balance from Polymarket; using initial_cash_usd"
-                        );
-                    }
-                }
 
                 let policy = Arc::new(DualPolicy::new().with_maker_offset(config.maker_price_offset));
                 info!(

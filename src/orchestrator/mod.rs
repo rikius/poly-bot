@@ -112,6 +112,10 @@ impl Bot {
 
         let mut tick_interval = interval(Duration::from_millis(100));
         let mut heartbeat_interval = interval(Duration::from_secs(10));
+        // Re-discover 15-min markets every 5 minutes so the bot picks up new
+        // rounds automatically as old markets expire.
+        let mut market_refresh_interval = interval(Duration::from_secs(300));
+        market_refresh_interval.tick().await; // consume the immediate first tick
 
         loop {
             tokio::select! {
@@ -136,6 +140,10 @@ impl Bot {
 
                 _ = heartbeat_interval.tick() => {
                     self.log_heartbeat().await;
+                }
+
+                _ = market_refresh_interval.tick() => {
+                    self.refresh_markets().await;
                 }
 
                 _ = self.kill_switch.wait_for_kill() => {

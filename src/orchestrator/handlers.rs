@@ -2,8 +2,11 @@
 
 use super::Bot;
 use crate::strategy::StrategyContext;
-use crate::websocket::{MarketMessage, UserMessage};
+use crate::websocket::{MarketDiscovery, MarketMessage, MarketWebSocket, UserMessage};
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 impl Bot {
@@ -182,6 +185,77 @@ impl Bot {
         if !intents.is_empty() {
             self.process_intents(intents);
         }
+    }
+
+    /// Refresh market subscriptions — discovers new 15-min markets and drops expired ones.
+    ///
+    /// Called every 5 minutes from the main run loop.  When the market set changes the
+    /// `MarketWebSocket` task is restarted so the new token IDs are subscribed immediately.
+    pub(crate) async fn refresh_markets(&mut self) {
+        info!("Refreshing 15-min market subscriptions...");
+
+        let discovery = MarketDiscovery::new();
+        let discovered = match discovery.discover_crypto_15min().await {
+            Ok(markets) => markets.into_iter().take(5).collect::<Vec<_>>(),
+            Err(e) => {
+                warn!(error = %e, "Market refresh discovery failed — keeping current subscriptions");
+                return;
+            }
+        };
+
+        let new_ids: HashSet<String> = discovered.iter().map(|d| d.condition_id.clone()).collect();
+        let existing_ids: HashSet<String> = self.market_registry.all_condition_ids().into_iter().collect();
+
+        let added_count = new_ids.difference(&existing_ids).count();
+        let removed_count = existing_ids.difference(&new_ids).count();
+
+        if added_count == 0 && removed_count == 0 {
+            info!("Market refresh: no changes ({} markets active)", existing_ids.len());
+            return;
+        }
+
+        // Register newly-discovered markets
+        for dm in discovered.iter().filter(|d| !existing_ids.contains(&d.condition_id)) {
+            info!(
+                condition_id = %dm.condition_id,
+                question = %dm.question,
+                "New market registered"
+            );
+            self.market_registry.register(dm.to_market_pair());
+        }
+
+        // Unregister expired markets (condition IDs no longer in the fresh discovery)
+        for condition_id in existing_ids.iter().filter(|id| !new_ids.contains(*id)) {
+            info!(condition_id = %condition_id, "Expired market unregistered");
+            self.market_registry.unregister(condition_id);
+        }
+
+        info!(
+            added = added_count,
+            removed = removed_count,
+            total = self.market_registry.len(),
+            "Market set updated — restarting WebSocket"
+        );
+
+        // Build the new full token list from the updated registry
+        let token_ids: Vec<String> = self
+            .market_registry
+            .all_pairs()
+            .iter()
+            .flat_map(|p| [p.yes_token_id.clone(), p.no_token_id.clone()])
+            .collect();
+
+        // Abort the old subscription and spawn a new one with the updated token set
+        self.market_ws_task.abort();
+        let (market_ws_tx, market_ws_rx) = mpsc::unbounded_channel();
+        let market_ws = Arc::new(MarketWebSocket::new(token_ids.clone(), market_ws_tx));
+        let market_ws_clone = market_ws.clone();
+        self.market_ws_task = tokio::spawn(async move {
+            market_ws_clone.run().await;
+        });
+        self.market_ws_rx = market_ws_rx;
+
+        info!(token_count = token_ids.len(), "Market WebSocket restarted with updated token set");
     }
 
     /// Log current book state (rate limited — max once per second per token).
