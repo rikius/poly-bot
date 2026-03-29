@@ -13,7 +13,6 @@
 
 pub mod alerts;
 pub mod api;
-pub mod bot;
 pub mod config;
 pub mod constants;
 pub mod error;
@@ -23,12 +22,14 @@ pub mod kill_switch;
 pub mod latency;
 pub mod ledger;
 pub mod metrics;
+pub mod orchestrator;
 pub mod risk;
 pub mod state;
 pub mod strategy;
 pub mod websocket;
 
-pub use bot::Bot;
+pub use orchestrator::Bot;
+pub use orchestrator::AuthComponents;
 pub use config::Config;
 pub use error::{BotError, Result};
 pub use kill_switch::KillSwitch;

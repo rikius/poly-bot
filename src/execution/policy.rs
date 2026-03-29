@@ -8,6 +8,28 @@ use crate::websocket::types::OrderType;
 use crate::strategy::Urgency;
 use rust_decimal::Decimal;
 
+// ---------------------------------------------------------------------------
+// Tick-size rounding helpers
+// ---------------------------------------------------------------------------
+
+/// Round price UP to the nearest tick boundary (for taker BUY limit prices).
+/// Ensures the limit price meets or exceeds the ask so FOK/FAK will fill.
+fn round_up_to_tick(price: Decimal, tick_size: Decimal) -> Decimal {
+    if tick_size.is_zero() {
+        return price;
+    }
+    (price / tick_size).ceil() * tick_size
+}
+
+/// Round price DOWN to the nearest tick boundary (for maker BUY posting prices).
+/// Keeps the bid at a valid tick without overshooting.
+fn round_down_to_tick(price: Decimal, tick_size: Decimal) -> Decimal {
+    if tick_size.is_zero() {
+        return price;
+    }
+    (price / tick_size).floor() * tick_size
+}
+
 // ============================================================================
 // PARTIAL FILL ACTION - What to do when order partially fills
 // ============================================================================
@@ -99,6 +121,8 @@ pub struct IntentRef {
     pub urgency: Urgency,
     pub strategy_name: String,
     pub group_id: Option<String>,
+    /// Market tick size; zero means no rounding
+    pub tick_size: Decimal,
 }
 
 impl IntentRef {
@@ -112,6 +136,7 @@ impl IntentRef {
             urgency: intent.urgency,
             strategy_name: intent.strategy_name.clone(),
             group_id: intent.group_id.clone(),
+            tick_size: intent.tick_size,
         }
     }
 }
@@ -181,10 +206,14 @@ impl ExecutionPolicy for TakerPolicy {
             0
         };
 
+        // Round price to tick boundary so the exchange accepts it.
+        // Taker BUY: round UP so the limit price meets/exceeds the ask.
+        let price = round_up_to_tick(intent.price, intent.tick_size);
+
         OrderParams {
             token_id: intent.token_id.clone(),
             side: intent.side,
-            price: intent.price,
+            price,
             size: intent.size,
             order_type,
             expiration,
@@ -265,19 +294,28 @@ impl MakerPolicy {
         self
     }
 
-    /// Apply price offset to intent price
-    fn apply_price_offset(&self, price: Decimal, side: crate::websocket::types::Side) -> Decimal {
+    /// Apply price offset to intent price, then round to tick boundary.
+    /// Maker BUY: round DOWN — keeps the passive bid at a valid tick.
+    /// Maker SELL: round UP — keeps the passive ask at a valid tick.
+    fn apply_price_offset(
+        &self,
+        price: Decimal,
+        side: crate::websocket::types::Side,
+        tick_size: Decimal,
+    ) -> Decimal {
         use crate::websocket::types::Side;
-
-        if self.price_offset_cents == Decimal::ZERO {
-            return price;
-        }
 
         let offset = self.price_offset_cents / Decimal::from(100); // Convert cents to price
 
+        let adjusted = match side {
+            Side::Buy => price + offset,
+            Side::Sell => price - offset,
+        };
+
+        // Round to tick so sub-cent offsets never produce invalid prices
         match side {
-            Side::Buy => price + offset, // More aggressive bid
-            Side::Sell => price - offset, // More aggressive ask
+            Side::Buy => round_down_to_tick(adjusted, tick_size),
+            Side::Sell => round_up_to_tick(adjusted, tick_size),
         }
     }
 }
@@ -291,8 +329,8 @@ impl ExecutionPolicy for MakerPolicy {
         // Maker always uses GTC, regardless of urgency
         let order_type = OrderType::GTC;
 
-        // Apply price offset for more aggressive posting
-        let adjusted_price = self.apply_price_offset(intent.price, intent.side);
+        // Apply price offset and round to tick boundary
+        let adjusted_price = self.apply_price_offset(intent.price, intent.side, intent.tick_size);
 
         let expiration = if self.expiration_secs > 0 {
             std::time::SystemTime::now()
@@ -415,6 +453,7 @@ mod tests {
             urgency,
             strategy_name: "TestStrategy".to_string(),
             group_id,
+            tick_size: Decimal::ZERO,
         }
     }
 
@@ -534,6 +573,7 @@ mod tests {
             urgency: Urgency::Passive,
             strategy_name: "Test".to_string(),
             group_id: None,
+            tick_size: Decimal::ZERO,
         };
 
         let params = policy.to_order_params(&intent);

@@ -33,13 +33,17 @@ pub struct MathArbConfig {
     /// Minimum edge to execute (default: 3 cents for taker)
     pub min_edge: Decimal,
 
-    /// Maximum position size per trade
+    /// Maximum position size per trade (shares).
     pub max_position_size: Decimal,
 
-    /// Minimum position size per trade
+    /// Minimum position size per trade (shares).
     pub min_position_size: Decimal,
 
-    /// Maximum total exposure across all positions
+    /// Maximum total cost per bet in USD (both legs combined).
+    /// Maps directly to MAX_BET_USD from the global config.
+    pub max_bet_usd: Decimal,
+
+    /// Maximum total exposure across all positions.
     pub max_total_exposure: Decimal,
 
     /// Cooldown between trades on same market (ms)
@@ -52,11 +56,12 @@ pub struct MathArbConfig {
 impl Default for MathArbConfig {
     fn default() -> Self {
         Self {
-            min_edge: dec!(0.03),       // 3 cents minimum edge
-            max_position_size: dec!(500), // Max $500 per leg
-            min_position_size: dec!(10),  // Min $10 per leg
-            max_total_exposure: dec!(2000), // Max $2000 total
-            cooldown_ms: 1000,           // 1 second cooldown
+            min_edge: dec!(0.03),
+            max_position_size: dec!(500),
+            min_position_size: dec!(1),
+            max_bet_usd: dec!(5),           // overridden from config
+            max_total_exposure: dec!(2000),
+            cooldown_ms: 1000,
             use_maker_execution: false,
         }
     }
@@ -76,6 +81,18 @@ impl MathArbConfig {
             ..Self::default()
         }
     }
+}
+
+/// Round a price UP to the nearest multiple of tick_size.
+///
+/// Used for BUY limit prices: ensures our limit price meets or exceeds the ask
+/// so a FOK/FAK order will fill even when the raw book price has sub-tick precision.
+fn round_up_to_tick(price: Decimal, tick_size: Decimal) -> Decimal {
+    if tick_size.is_zero() {
+        return price;
+    }
+    let ticks = price / tick_size;
+    ticks.ceil() * tick_size
 }
 
 /// Mathematical arbitrage strategy
@@ -186,18 +203,55 @@ impl MathArbStrategy {
             return None;
         }
 
-        // Quick check first
-        let (yes_ask, no_ask, edge) =
+        // Quick check first (uses raw book prices)
+        let (yes_ask_raw, no_ask_raw, edge) =
             self.edge_calculator
                 .quick_check(ctx.books, &pair.yes_token_id, &pair.no_token_id)?;
 
         debug!(
             market = %pair.condition_id,
-            yes_ask = %yes_ask,
-            no_ask = %no_ask,
+            yes_ask = %yes_ask_raw,
+            no_ask = %no_ask_raw,
             edge = %edge,
             "Arb opportunity detected (quick check)"
         );
+
+        // Round ask prices UP to the market tick size.
+        // The exchange rejects prices with more decimal places than the tick size allows
+        // (e.g. Polymarket may stream 0.18005 but only accepts multiples of 0.01).
+        // Rounding UP ensures our buy limit price still crosses the ask.
+        let yes_ask = round_up_to_tick(yes_ask_raw, pair.tick_size);
+        let no_ask = round_up_to_tick(no_ask_raw, pair.tick_size);
+
+        if yes_ask != yes_ask_raw || no_ask != no_ask_raw {
+            debug!(
+                market = %pair.condition_id,
+                yes_ask_raw = %yes_ask_raw, yes_ask_rounded = %yes_ask,
+                no_ask_raw = %no_ask_raw, no_ask_rounded = %no_ask,
+                tick_size = %pair.tick_size,
+                "Sub-tick prices rounded up to tick boundary"
+            );
+            // Re-check profitability with rounded prices — rounding up erodes edge
+            let combined_rounded = yes_ask + no_ask;
+            if combined_rounded >= Decimal::ONE {
+                debug!(
+                    market = %pair.condition_id,
+                    combined = %combined_rounded,
+                    "Not profitable after tick rounding (combined >= 1)"
+                );
+                return None;
+            }
+            let edge_after_round = Decimal::ONE - combined_rounded;
+            if edge_after_round < self.config.min_edge {
+                debug!(
+                    market = %pair.condition_id,
+                    edge = %edge_after_round,
+                    min_edge = %self.config.min_edge,
+                    "Edge insufficient after tick rounding"
+                );
+                return None;
+            }
+        }
 
         // Full edge calculation
         let calc = self.edge_calculator.calculate(
@@ -224,11 +278,27 @@ impl MathArbStrategy {
             let current = *self.current_exposure.read().unwrap();
             (self.config.max_total_exposure - current) / dec!(2) // Divided by 2 since we're buying both sides
         };
+        let combined_ask = yes_ask + no_ask;
+        let max_by_balance = if combined_ask > Decimal::ZERO {
+            ctx.available_cash() / combined_ask
+        } else {
+            Decimal::ZERO
+        };
 
+        // Cap total cost per bet to max_bet_usd (both legs combined).
+        let max_by_bet = if combined_ask > Decimal::ZERO {
+            self.config.max_bet_usd / combined_ask
+        } else {
+            Decimal::ZERO
+        };
         let trade_size = max_by_book
             .min(max_by_config)
             .min(max_by_exposure)
-            .max(Decimal::ZERO);
+            .min(max_by_balance)
+            .min(max_by_bet)
+            .max(Decimal::ZERO)
+            // Polymarket requires size to have at most 2 decimal places.
+            .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero);
 
         if trade_size < self.config.min_position_size {
             debug!(
@@ -241,11 +311,15 @@ impl MathArbStrategy {
         }
 
         // Check exposure limit
-        let total_notional = (yes_ask + no_ask) * trade_size;
+        let total_notional = combined_ask * trade_size;
         if !self.check_exposure_limit(total_notional) {
+            let current = *self.current_exposure.read().unwrap();
             debug!(
                 market = %pair.condition_id,
-                "Exposure limit would be exceeded"
+                current_exposure = %current,
+                additional = %total_notional,
+                max = %self.config.max_total_exposure,
+                "Skipping: exposure limit would be exceeded"
             );
             return None;
         }
@@ -281,7 +355,8 @@ impl MathArbStrategy {
             self.name.clone(),
         )
         .with_group(group_id.clone())
-        .with_priority(100); // High priority for arb
+        .with_priority(100) // High priority for arb
+        .with_tick_size(pair.tick_size);
 
         let no_intent = OrderIntent::new(
             pair.condition_id.clone(),
@@ -294,7 +369,8 @@ impl MathArbStrategy {
             self.name.clone(),
         )
         .with_group(group_id)
-        .with_priority(100);
+        .with_priority(100)
+        .with_tick_size(pair.tick_size);
 
         // Record trade for cooldown
         self.record_trade(&pair.condition_id);
@@ -357,6 +433,11 @@ impl Strategy for MathArbStrategy {
 
         // Check cooldown
         if self.is_on_cooldown(market_id) {
+            debug!(
+                market = %market_id,
+                cooldown_ms = self.config.cooldown_ms,
+                "Skipping evaluation: market on cooldown"
+            );
             return vec![];
         }
 
@@ -633,21 +714,22 @@ mod tests {
     fn test_exposure_limit() {
         let registry = setup_registry();
         let mut config = MathArbConfig::default();
-        config.max_total_exposure = dec!(10); // Very low limit
+        // max_total_exposure = 1 → max_by_exposure = 0.5 shares per leg,
+        // which is below min_position_size (1.0) → trade should be skipped.
+        config.max_total_exposure = dec!(1);
         let strategy = MathArbStrategy::with_config(registry, config);
 
         let books = setup_books_with_arb();
         let ledger = Ledger::new(dec!(10000));
         let ctx = StrategyContext::new(&books, &ledger);
 
-        // Should fail due to exposure limit
+        // Trade size capped by exposure limit → below minimum → no intents
         let intents = strategy.on_book_update(
             &"0xmarket123".to_string(),
             &"yes_token_123".to_string(),
             &ctx,
         );
 
-        // Trade size would be ~$9.70 which is below min of $10
         assert!(intents.is_empty());
     }
 }

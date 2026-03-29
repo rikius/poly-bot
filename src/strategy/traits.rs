@@ -76,6 +76,10 @@ pub struct OrderIntent {
     /// Priority (higher = more important, for conflict resolution)
     pub priority: u8,
 
+    /// Market tick size — used by execution policy to round prices after any
+    /// offset is applied. Zero means "no rounding" (policy passes price as-is).
+    pub tick_size: Decimal,
+
     /// Created timestamp
     pub created_at: Instant,
 }
@@ -103,6 +107,7 @@ impl OrderIntent {
             strategy_name: strategy_name.into(),
             group_id: None,
             priority: 50, // Default middle priority
+            tick_size: Decimal::ZERO,
             created_at: Instant::now(),
         }
     }
@@ -116,6 +121,12 @@ impl OrderIntent {
     /// Set priority (0-255, higher = more important)
     pub fn with_priority(mut self, priority: u8) -> Self {
         self.priority = priority;
+        self
+    }
+
+    /// Set market tick size so the execution policy can round after offsets
+    pub fn with_tick_size(mut self, tick_size: Decimal) -> Self {
+        self.tick_size = tick_size;
         self
     }
 

@@ -26,6 +26,7 @@ use polymarket_client_sdk::clob::types::{
 use polymarket_client_sdk::clob::types::response::PostOrderResponse;
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 
 use crate::alerts::AlertSender;
 use crate::constants::PARTIAL_FILL_UNWIND_MS;
@@ -405,6 +406,10 @@ impl OrderExecutor {
 
         let t0 = Instant::now();
 
+        // Polymarket requires maker_amount (price × size in USDC) to have ≤ 2dp.
+        // Quantize size down to the largest valid multiple before handing to SDK.
+        let size = quantize_size_for_usdc_precision(params.price, params.size);
+
         // Build order — SDK validates tick-size and lot-size automatically
         let signable = self
             .clob_client
@@ -412,7 +417,7 @@ impl OrderExecutor {
             .token_id(sdk_token_id)
             .side(sdk_side)
             .price(params.price)
-            .size(params.size)
+            .size(size)
             .order_type(sdk_order_type)
             .build()
             .await?;
@@ -515,11 +520,53 @@ impl OrderExecutor {
                 count
             }
             Err(e) => {
-                error!(error = %e, "Bulk cancel-all failed");
+                let msg = e.to_string();
+                if msg.contains("401") || msg.contains("Unauthorized") {
+                    error!(
+                        error = %msg,
+                        "Bulk cancel-all failed: 401 Unauthorized — L2 credentials are invalid. \
+                         Check POLYMARKET_API_KEY / POLYMARKET_SECRET / POLYMARKET_PASSPHRASE."
+                    );
+                } else {
+                    error!(error = %msg, "Bulk cancel-all failed");
+                }
                 0
             }
         }
     }
+}
+
+// ============================================================================
+// AMOUNT PRECISION HELPERS
+// ============================================================================
+
+/// Quantize `size` so that `price × size` (the USDC maker_amount) has ≤ 2dp.
+///
+/// For prices like $0.51 (where gcd(51, 100) = 1) this rounds size down to
+/// the nearest whole number. For $0.50 it rounds to the nearest 0.02, etc.
+fn quantize_size_for_usdc_precision(price: Decimal, size: Decimal) -> Decimal {
+    use rust_decimal::prelude::ToPrimitive as _;
+    if price.is_zero() || size.is_zero() {
+        return size;
+    }
+    // Price expressed as integer hundredths (round to suppress sub-cent noise).
+    let price_cents = (price * dec!(100)).round().to_i64().unwrap_or(1).max(1) as u64;
+    // lot_size = (100 / gcd(price_cents, 100)) / 100
+    // e.g. P=0.51 → gcd=1 → lot=100/100=1.00 (integers only)
+    //      P=0.50 → gcd=50 → lot=2/100=0.02
+    //      P=0.58 → gcd=2  → lot=50/100=0.50
+    let g = gcd_u64(price_cents, 100);
+    let lot = Decimal::new((100 / g) as i64, 2);
+    (size / lot).floor() * lot
+}
+
+fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
 }
 
 // ============================================================================
@@ -529,6 +576,28 @@ impl OrderExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_quantize_size_for_usdc_precision() {
+        use rust_decimal_macros::dec;
+        // P=0.51: gcd(51,100)=1 → lot=1.00
+        assert_eq!(quantize_size_for_usdc_precision(dec!(0.51), dec!(5.55)), dec!(5));
+        assert_eq!(quantize_size_for_usdc_precision(dec!(0.51), dec!(1.99)), dec!(1));
+        // P=0.50: gcd(50,100)=50 → lot=0.02
+        assert_eq!(quantize_size_for_usdc_precision(dec!(0.50), dec!(5.55)), dec!(5.54));
+        // P=0.58: gcd(58,100)=2 → lot=0.50
+        assert_eq!(quantize_size_for_usdc_precision(dec!(0.58), dec!(5.55)), dec!(5.50));
+        // P=0.29: gcd(29,100)=1 → lot=1.00
+        assert_eq!(quantize_size_for_usdc_precision(dec!(0.29), dec!(5.25)), dec!(5));
+        // Already valid
+        assert_eq!(quantize_size_for_usdc_precision(dec!(0.51), dec!(3.00)), dec!(3));
+        // Verify resulting USDC amounts are multiples of $0.01 (≤ 2dp)
+        for (price, size) in [(dec!(0.51), dec!(5.55)), (dec!(0.29), dec!(5.25)), (dec!(0.58), dec!(5.55))] {
+            let s = quantize_size_for_usdc_precision(price, size);
+            let usdc = price * s;
+            assert_eq!((usdc * dec!(100)).fract(), Decimal::ZERO, "USDC not 2dp for price={price}, size={size}");
+        }
+    }
 
     #[test]
     fn test_execution_status_eq() {

@@ -237,11 +237,27 @@ impl Config {
             }
         }
 
-        is_valid(&self.api_key)
+        let has_wallet = is_valid(&self.wallet_address);
+
+        // Full live mode: private key present — credentials are derived automatically.
+        let has_signer = is_valid(&self.private_key);
+
+        // Simulation/monitoring mode: explicit API key env vars provided without a
+        // private key (e.g. for connecting the user WebSocket without placing orders).
+        let has_manual_creds = is_valid(&self.api_key)
             && is_valid(&self.secret_key)
-            && is_valid(&self.passphrase)
-            && is_valid(&self.private_key)
-            && is_valid(&self.wallet_address)
+            && is_valid(&self.passphrase);
+
+        has_wallet && (has_signer || has_manual_creds)
+    }
+
+    /// Whether the bot can derive L2 credentials from its private key.
+    /// False in simulation mode where only manual API credentials are provided.
+    pub fn has_private_key(&self) -> bool {
+        self.private_key.as_deref().map_or(false, |s| {
+            let s = s.trim();
+            !s.is_empty() && s != "0x" && s != "0x0" && s.len() > 4
+        })
     }
 }
 
