@@ -36,6 +36,14 @@ impl Default for Ledger {
 }
 
 impl Ledger {
+    /// Sync the cash balance to a known on-chain amount.
+    ///
+    /// Called at startup after querying Polymarket's `balance-allowance` endpoint
+    /// so the ledger reflects the wallet's actual deposited USDC.
+    pub fn sync_cash(&self, on_chain_balance: Decimal) {
+        self.cash.reset(on_chain_balance);
+    }
+
     /// Create a new ledger with initial cash balance
     pub fn new(initial_cash: Decimal) -> Self {
         Self {

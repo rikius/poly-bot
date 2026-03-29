@@ -37,6 +37,8 @@ use chrono::Utc;
 use rust_decimal::Decimal;
 use polymarket_client_sdk::auth::{Credentials, Signer as _};
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
+use polymarket_client_sdk::clob::types::AssetType;
+use polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest;
 use polymarket_client_sdk::POLYGON;
 use std::collections::HashMap;
 use std::str::FromStr as _;
@@ -253,34 +255,44 @@ impl Bot {
                         .with_chain_id(Some(POLYGON)),
                 );
 
-                let clob_client = ClobClient::new(clob_url, ClobConfig::default())
-                    .expect("Failed to create CLOB client")
+                // Derive credentials without the noisy create-first fallback.
+                // authentication_builder without .credentials() calls create_or_derive
+                // internally (which logs a 400 warning when the key already exists).
+                // By calling derive_api_key() explicitly we skip the create attempt.
+                let unauth_client = ClobClient::new(clob_url, ClobConfig::default())
+                    .expect("Failed to create CLOB client");
+                let creds = unauth_client
+                    .derive_api_key(signer.as_ref(), None)
+                    .await
+                    .expect(
+                        "Failed to derive API key from private key. \
+                         Ensure your wallet is registered on Polymarket.",
+                    );
+                let clob_client = unauth_client
                     .authentication_builder(signer.as_ref())
+                    .credentials(creds.clone())
                     .authenticate()
                     .await
-                    .expect("Failed to authenticate CLOB client");
+                    .expect("Failed to create authenticated CLOB client");
 
-                let creds = clob_client.credentials().clone();
+                info!(api_key = %creds.key(), "L2 credentials derived");
 
-                // Validate immediately — wrong credentials would only surface at the
-                // first API call and produce a confusing 401 at runtime.
-                match clob_client.api_keys().await {
-                    Ok(_) => {
-                        info!(api_key = %creds.key(), "L2 credentials derived and validated");
+                // Sync ledger cash to the actual Polymarket USDC balance so
+                // trade sizing is based on real available funds, not a config default.
+                match clob_client.balance_allowance(
+                    BalanceAllowanceRequest::builder()
+                        .asset_type(AssetType::Collateral)
+                        .build(),
+                ).await {
+                    Ok(resp) => {
+                        info!(balance_usdc = %resp.balance, "Portfolio balance loaded from Polymarket");
+                        ledger.sync_cash(resp.balance);
                     }
                     Err(e) => {
-                        let msg = e.to_string();
-                        if msg.contains("401") || msg.contains("Unauthorized") || msg.contains("Invalid api key") {
-                            panic!(
-                                "L2 credential validation failed (401 Unauthorized). \
-                                 Credentials were derived from PRIVATE_KEY but rejected by the API. \
-                                 Check that PRIVATE_KEY is correct and your wallet is registered on Polymarket. \
-                                 Error: {msg}"
-                            );
-                        }
                         warn!(
-                            error = %msg,
-                            "Could not validate L2 credentials at startup (non-auth error); proceeding"
+                            error = %e,
+                            initial_cash_usd = %config.initial_cash_usd,
+                            "Could not load portfolio balance from Polymarket; using initial_cash_usd"
                         );
                     }
                 }
