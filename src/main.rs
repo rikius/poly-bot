@@ -11,6 +11,8 @@ use polymarket_bot::strategy::MarketPair;
 use polymarket_bot::{AuthComponents, Bot, Config, KillSwitch};
 use polymarket_client_sdk::auth::Signer as _;
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
+use polymarket_client_sdk::clob::types::SignatureType;
+use polymarket_client_sdk::clob::types::request::{BalanceAllowanceRequest, UpdateBalanceAllowanceRequest};
 use polymarket_client_sdk::POLYGON;
 use std::str::FromStr as _;
 use std::sync::Arc;
@@ -154,13 +156,48 @@ async fn main() -> anyhow::Result<()> {
                 "Failed to derive API key from private key. \
                  Ensure your wallet is registered on Polymarket.",
             );
+
         info!(api_key = %creds.key(), "L2 credentials derived");
         let authenticated = clob_client
             .authentication_builder(signer.as_ref())
             .credentials(creds.clone())
+            .signature_type(SignatureType::Proxy)
+
             .authenticate()
             .await
             .expect("Failed to create authenticated CLOB client");
+
+        // // Now you can trade!
+        // let order = authenticated.limit_order()
+        //     .token_id("123456".parse()?)
+        //     .price(dec!(0.65))
+        //     .size(dec!(100))
+        //     .side(Side::Buy)
+        //     .build().await?;
+        // let signed = authenticated.sign(&signer, order).await?;
+        // let response = authenticated.post_order(signed).await?;
+
+        match authenticated.api_keys().await {
+            Ok(keys) => info!(endpoint = "api_keys", result = ?keys),
+            Err(e) => error!(endpoint = "api_keys", error = %e),
+        }
+
+        match authenticated
+            .balance_allowance(BalanceAllowanceRequest::default())
+            .await
+        {
+            Ok(b) => info!(endpoint = "balance_allowance", result = ?b),
+            Err(e) => error!(endpoint = "balance_allowance", error = %e),
+        }
+
+        match authenticated
+            .update_balance_allowance(UpdateBalanceAllowanceRequest::default())
+            .await
+        {
+            Ok(b) => info!(endpoint = "update_balance_allowance", result = ?b),
+            Err(e) => error!(endpoint = "update_balance_allowance", error = %e),
+        }
+
         Some(AuthComponents {
             clob_client: authenticated,
             signer,

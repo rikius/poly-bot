@@ -26,10 +26,11 @@ use polymarket_client_sdk::clob::types::{
 use polymarket_client_sdk::clob::types::response::PostOrderResponse;
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
+// use rust_decimal::RoundingStrategy;
 use rust_decimal_macros::dec;
 
 use crate::alerts::AlertSender;
-use crate::constants::PARTIAL_FILL_UNWIND_MS;
+use crate::constants::{PARTIAL_FILL_UNWIND_MS, UNWIND_SETTLE_DELAY_MS};
 use crate::error::ErrorType;
 use crate::execution::policy::{ExecutionPolicy, IntentRef, OrderParams};
 use crate::metrics::BotLatency;
@@ -188,7 +189,13 @@ impl OrderExecutor {
 
         // Convert intent to order params using policy
         let intent_ref = IntentRef::from_intent(intent);
-        let params = self.policy.to_order_params(&intent_ref);
+        let mut params = self.policy.to_order_params(&intent_ref);
+        // Quantize size here so params.size reflects the actual submitted size.
+        // build_sign_submit also calls this, but params.size is used by
+        // process_response for fill comparison — if they disagree a fully-filled
+        // quantized order is misclassified as PartialFill, spuriously triggering
+        // unwind logic.
+        params.size = quantize_size_for_usdc_precision(params.price, params.size);
 
         debug!(
             token = %params.token_id,
@@ -324,6 +331,10 @@ impl OrderExecutor {
             return results;
         }
 
+        // Wait for the exchange to credit freshly-filled tokens before selling.
+        // Without this the sell gets "balance: 0" because the fill hasn't settled.
+        tokio::time::sleep(Duration::from_millis(UNWIND_SETTLE_DELAY_MS)).await;
+
         // Run all unwinds within the deadline
         let deadline = tokio::time::Instant::now()
             + Duration::from_millis(PARTIAL_FILL_UNWIND_MS);
@@ -404,20 +415,25 @@ impl OrderExecutor {
             OrderType::FAK => SdkOrderType::FAK,
         };
 
+        // --- NEW FIX START ---
+        // Strictly truncate decimals to meet Polymarket API requirements.
+        // Maker amount (USDC) supports max 2 decimals.
+        // Price usually supports 4 decimals on crypto markets.
+        // let sanitized_price = params.price.round_dp_with_strategy(4, RoundingStrategy::ToZero);
+        // let sanitized_size = params.size.round_dp_with_strategy(2, RoundingStrategy::ToZero);
+        // --- NEW FIX END ---
+
         let t0 = Instant::now();
 
-        // Polymarket requires maker_amount (price × size in USDC) to have ≤ 2dp.
-        // Quantize size down to the largest valid multiple before handing to SDK.
-        let size = quantize_size_for_usdc_precision(params.price, params.size);
-
-        // Build order — SDK validates tick-size and lot-size automatically
+        // Build order — SDK validates tick-size and lot-size automatically.
+        // params.size is already quantized for USDC precision by execute().
         let signable = self
             .clob_client
             .limit_order()
             .token_id(sdk_token_id)
             .side(sdk_side)
             .price(params.price)
-            .size(size)
+            .size(params.size)
             .order_type(sdk_order_type)
             .build()
             .await?;

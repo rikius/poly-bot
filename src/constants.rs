@@ -70,6 +70,11 @@ pub const CONNECTION_WARM_INTERVAL: Duration = Duration::from_secs(30);
 /// Max time to hold unhedged position from partial fill
 pub const PARTIAL_FILL_UNWIND_MS: u64 = 500;
 
+/// Delay before submitting an unwind order after a fill.
+/// Gives the exchange time to credit freshly-filled tokens before we try
+/// to sell them; without this the sell gets "balance: 0" errors.
+pub const UNWIND_SETTLE_DELAY_MS: u64 = 300;
+
 // ============================================================================
 // POSITION SIZING
 // ============================================================================
