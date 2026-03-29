@@ -35,7 +35,7 @@ use crate::websocket::types::Side;
 use alloy_signer_local::PrivateKeySigner;
 use chrono::Utc;
 use rust_decimal::Decimal;
-use polymarket_client_sdk::auth::Signer as _;
+use polymarket_client_sdk::auth::{Credentials, Signer as _};
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::POLYGON;
 use std::collections::HashMap;
@@ -243,74 +243,80 @@ impl Bot {
 
         // Authenticate and set up executor + user WS only if credentials are available
         let (executor, user_ws_rx, user_ws_task) = if config.has_credentials() {
-            // Set up SDK signer + authenticated CLOB client
-            let signer = Arc::new(
-                PrivateKeySigner::from_str(config.private_key.as_ref().unwrap())
-                    .expect("Invalid private key")
-                    .with_chain_id(Some(POLYGON)),
-            );
+            // Resolve L2 credentials:
+            //   Live mode   — derive from private key via Polymarket API
+            //   Sim mode    — use manually-provided POLYMARKET_API_KEY / SECRET / PASSPHRASE
+            let (sdk_credentials, maybe_executor) = if config.has_private_key() {
+                let signer = Arc::new(
+                    PrivateKeySigner::from_str(config.private_key.as_ref().unwrap())
+                        .expect("Invalid private key")
+                        .with_chain_id(Some(POLYGON)),
+                );
 
-            let clob_client = ClobClient::new(clob_url, ClobConfig::default())
-                .expect("Failed to create CLOB client")
-                .authentication_builder(signer.as_ref())
-                .authenticate()
-                .await
-                .expect("Failed to authenticate CLOB client");
+                let clob_client = ClobClient::new(clob_url, ClobConfig::default())
+                    .expect("Failed to create CLOB client")
+                    .authentication_builder(signer.as_ref())
+                    .authenticate()
+                    .await
+                    .expect("Failed to authenticate CLOB client");
 
-            // Extract the derived credentials so we can pass them to the user WebSocket.
-            let sdk_credentials = clob_client.credentials().clone();
+                let creds = clob_client.credentials().clone();
 
-            // Validate L2 credentials immediately — authenticate() stores them without a
-            // server round-trip, so wrong credentials would only surface at the first API
-            // call (cancel-all, post-order, etc.) and produce a confusing 401 at runtime.
-            match clob_client.api_keys().await {
-                Ok(_keys) => {
-                    info!(
-                        api_key = %sdk_credentials.key(),
-                        "L2 credentials derived and validated"
-                    );
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains("401") || msg.contains("Unauthorized") || msg.contains("Invalid api key") {
-                        panic!(
-                            "L2 credential validation failed (401 Unauthorized). \
-                             Credentials were derived from PRIVATE_KEY but rejected by the API. \
-                             Check that PRIVATE_KEY is correct and your wallet is registered on Polymarket. \
-                             Error: {msg}"
+                // Validate immediately — wrong credentials would only surface at the
+                // first API call and produce a confusing 401 at runtime.
+                match clob_client.api_keys().await {
+                    Ok(_) => {
+                        info!(api_key = %creds.key(), "L2 credentials derived and validated");
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if msg.contains("401") || msg.contains("Unauthorized") || msg.contains("Invalid api key") {
+                            panic!(
+                                "L2 credential validation failed (401 Unauthorized). \
+                                 Credentials were derived from PRIVATE_KEY but rejected by the API. \
+                                 Check that PRIVATE_KEY is correct and your wallet is registered on Polymarket. \
+                                 Error: {msg}"
+                            );
+                        }
+                        warn!(
+                            error = %msg,
+                            "Could not validate L2 credentials at startup (non-auth error); proceeding"
                         );
                     }
-                    // Non-auth errors (network, timeout) are non-fatal — proceed and let
-                    // the executor surface the error when it first submits an order.
-                    warn!(
-                        error = %msg,
-                        "Could not validate L2 credentials at startup (non-auth error); proceeding"
-                    );
                 }
-            }
 
-            // Use DualPolicy: Taker for Immediate/Normal, Maker for Passive
-            let policy = Arc::new(
-                DualPolicy::new()
-                    .with_maker_offset(config.maker_price_offset)
-            );
+                let policy = Arc::new(
+                    DualPolicy::new().with_maker_offset(config.maker_price_offset)
+                );
+                info!(
+                    "Execution policy: DualPolicy (Taker=FOK/FAK, Maker=GTC offset={} cents)",
+                    config.maker_price_offset
+                );
 
-            info!(
-                "Execution policy: DualPolicy (Taker=FOK/FAK, Maker=GTC offset={} cents)",
-                config.maker_price_offset
-            );
+                let exec = Arc::new(OrderExecutor::new(
+                    clob_client,
+                    signer,
+                    policy,
+                    circuit_breaker.clone(),
+                    Arc::clone(&latency),
+                    alerts.clone(),
+                ));
 
-            // SDK auto-detects neg-risk per token — no manual flag needed
-            let executor = Arc::new(OrderExecutor::new(
-                clob_client.clone(),
-                signer,
-                policy,
-                circuit_breaker.clone(),
-                Arc::clone(&latency),
-                alerts.clone(),
-            ));
+                (creds, Some(exec))
+            } else {
+                // Simulation mode: manual API credentials, no private key → no executor.
+                info!("Simulation mode: using manual API credentials (no private key — order execution disabled)");
+                let api_key = Uuid::parse_str(config.api_key.as_ref().unwrap())
+                    .expect("POLYMARKET_API_KEY must be a valid UUID");
+                let creds = Credentials::new(
+                    api_key,
+                    config.secret_key.clone().unwrap(),
+                    config.passphrase.clone().unwrap(),
+                );
+                (creds, None)
+            };
 
-            // Set up User WebSocket for fill notifications
+            // User WebSocket — works in both live and simulation mode.
             let wallet_address = config.wallet_address.as_ref().unwrap().parse()
                 .expect("WALLET_ADDRESS must be a valid Ethereum address");
             let (user_ws_tx, user_ws_rx) = mpsc::unbounded_channel();
@@ -320,14 +326,12 @@ impl Bot {
                 condition_ids,
                 user_ws_tx,
             ));
-
-            // Spawn User WebSocket task
             let user_ws_clone = user_ws.clone();
             let user_ws_task = tokio::spawn(async move {
                 user_ws_clone.run().await;
             });
 
-            (Some(executor), Some(user_ws_rx), Some(user_ws_task))
+            (maybe_executor, Some(user_ws_rx), Some(user_ws_task))
         } else {
             info!("Paper mode without credentials — no executor or user WebSocket");
             (None, None, None)
