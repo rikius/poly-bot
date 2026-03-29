@@ -91,6 +91,8 @@ struct PendingArb {
     no_token_id: TokenId,
     /// Expected fill size on each leg.
     size: Decimal,
+    /// USDC exposure reserved when this arb was posted (used to release on expiry).
+    reserved_notional: Decimal,
     posted_at: Instant,
 }
 
@@ -326,6 +328,7 @@ impl MakerRebateArbStrategy {
                 yes_token_id: pair.yes_token_id.clone(),
                 no_token_id: pair.no_token_id.clone(),
                 size: trade_size,
+                reserved_notional: total_notional,
                 posted_at: Instant::now(),
             },
         );
@@ -477,6 +480,10 @@ impl Strategy for MakerRebateArbStrategy {
                     info!(market = %p.condition_id, "✅ Maker arb: both legs filled");
                 }
                 (false, false) => {
+                    // Neither leg filled — release the exposure that was reserved
+                    // when these orders were posted.
+                    let mut exp = self.current_exposure.write().unwrap();
+                    *exp = (*exp - p.reserved_notional).max(Decimal::ZERO);
                     debug!(
                         market = %p.condition_id,
                         "Maker arb TTL expired, neither leg filled — cleaning up"

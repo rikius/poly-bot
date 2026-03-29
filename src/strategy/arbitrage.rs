@@ -714,21 +714,22 @@ mod tests {
     fn test_exposure_limit() {
         let registry = setup_registry();
         let mut config = MathArbConfig::default();
-        config.max_total_exposure = dec!(10); // Very low limit
+        // max_total_exposure = 1 → max_by_exposure = 0.5 shares per leg,
+        // which is below min_position_size (1.0) → trade should be skipped.
+        config.max_total_exposure = dec!(1);
         let strategy = MathArbStrategy::with_config(registry, config);
 
         let books = setup_books_with_arb();
         let ledger = Ledger::new(dec!(10000));
         let ctx = StrategyContext::new(&books, &ledger);
 
-        // Should fail due to exposure limit
+        // Trade size capped by exposure limit → below minimum → no intents
         let intents = strategy.on_book_update(
             &"0xmarket123".to_string(),
             &"yes_token_123".to_string(),
             &ctx,
         );
 
-        // Trade size would be ~$9.70 which is below min of $10
         assert!(intents.is_empty());
     }
 }
