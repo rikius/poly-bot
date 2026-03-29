@@ -15,14 +15,14 @@
 //! - Heartbeat for logging (10s)
 //! - Async kill signal for shutdown
 
-mod approvals;
+pub mod auth;
 mod execution;
 mod handlers;
 mod heartbeat;
 mod setup;
 mod shutdown;
 
-pub use setup::AuthComponents;
+pub use auth::AuthComponents;
 
 use crate::alerts::AlertSender;
 use crate::api::ControlState;

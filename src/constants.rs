@@ -73,7 +73,8 @@ pub const PARTIAL_FILL_UNWIND_MS: u64 = 500;
 /// Delay before submitting an unwind order after a fill.
 /// Gives the exchange time to credit freshly-filled tokens before we try
 /// to sell them; without this the sell gets "balance: 0" errors.
-pub const UNWIND_SETTLE_DELAY_MS: u64 = 300;
+/// pub const UNWIND_SETTLE_DELAY_MS: u64 = 300;
+pub const UNWIND_SETTLE_DELAY_MS: u64 = 0;
 
 // ============================================================================
 // POSITION SIZING
@@ -84,6 +85,11 @@ pub const MAX_BET_SIZE_USD: Decimal = dec!(5000.0);
 
 /// Minimum bet size (USD)
 pub const MIN_BET_SIZE_USD: Decimal = dec!(10.0);
+
+/// Polymarket exchange minimum notional per individual order (USD).
+/// Each leg of a trade must satisfy: price × size >= this value.
+/// Orders below this are rejected by the exchange with "minimum size" errors.
+pub const EXCHANGE_MIN_ORDER_USDC: Decimal = dec!(1);
 
 /// Maximum capital percentage per event
 pub const MAX_CAPITAL_PCT: Decimal = dec!(0.40);

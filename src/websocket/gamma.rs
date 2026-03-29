@@ -326,60 +326,50 @@ impl GammaClient {
         Ok(crypto_events)
     }
     
-    /// Supported crypto assets for 15-min Up/Down markets
+    /// All supported crypto assets for Up/Down markets
     pub const CRYPTO_ASSETS: &'static [&'static str] = &["btc", "eth", "sol"];
-    
-    /// Discover 15-minute crypto markets by slug pattern
-    /// 
-    /// 15-min crypto markets use slug format: `{asset}-updown-15m-{timestamp}`
-    /// where timestamp is a Unix epoch rounded to 15-minute intervals.
-    /// 
-    /// This method queries for:
-    /// - Current active market (current 15-min interval)  
-    /// - Next upcoming market (next 15-min interval)
-    /// 
-    /// For each supported crypto asset (BTC, ETH, SOL).
-    pub async fn discover_crypto_15min_markets(&self) -> Result<Vec<GammaEvent>> {
+
+    /// Discover crypto Up/Down markets by slug pattern.
+    ///
+    /// Slug format: `{asset}-updown-{timeframe}-{timestamp}`
+    ///
+    /// `assets`    – lowercase asset names to probe (e.g. `["btc"]`).
+    ///               Pass `Self::CRYPTO_ASSETS` to scan all three.
+    /// `timeframe` – interval string used in the slug, e.g. `"15m"` or `"5m"`.
+    ///               The corresponding interval in seconds must be passed as
+    ///               `interval_secs` (900 for 15m, 300 for 5m, etc.).
+    pub async fn discover_crypto_markets(
+        &self,
+        assets: &[&str],
+        timeframe: &str,
+        interval_secs: u64,
+    ) -> Result<Vec<GammaEvent>> {
         use std::time::{SystemTime, UNIX_EPOCH};
-        
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| BotError::Config(format!("System time error: {}", e)))?
             .as_secs();
-        
-        // Round to 15-minute intervals (900 seconds)
-        let interval = 900u64;
-        let current_interval = (now / interval) * interval;
-        
-        // Generate intervals to check:
-        // - Current (may be in progress or about to start)
-        // - Next (upcoming)
-        // - One after (further ahead)
+
+        let current_interval = (now / interval_secs) * interval_secs;
+
+        // Check current + next two intervals so we always have something live or imminent
         let intervals = [
             current_interval,
-            current_interval + interval,
-            current_interval + 2 * interval,
+            current_interval + interval_secs,
+            current_interval + 2 * interval_secs,
         ];
-        
+
         let mut all_events = Vec::new();
-        
-        for asset in Self::CRYPTO_ASSETS {
+
+        for asset in assets {
             for &ts in &intervals {
-                let slug = format!("{}-updown-15m-{}", asset, ts);
+                let slug = format!("{}-updown-{}-{}", asset, timeframe, ts);
                 match self.get_event_by_slug(&slug).await {
                     Ok(Some(event)) => {
-                        // Check if event has tradeable markets
-                        let has_tradeable = event.markets.iter().any(|m| {
-                            m.is_crypto_15min() && m.is_tradeable()
-                        });
-                        
+                        let has_tradeable = event.markets.iter().any(|m| m.is_tradeable());
                         if has_tradeable {
-                            debug!(
-                                slug = %slug, 
-                                asset = %asset,
-                                markets = event.markets.len(),
-                                "Found 15-min crypto event"
-                            );
+                            debug!(slug = %slug, asset = %asset, "Found crypto event");
                             all_events.push(event);
                         } else {
                             debug!(slug = %slug, "Event exists but no tradeable markets");
@@ -394,9 +384,14 @@ impl GammaClient {
                 }
             }
         }
-        
-        debug!(count = all_events.len(), "Discovered 15-min crypto events");
+
+        debug!(count = all_events.len(), "Discovered crypto events");
         Ok(all_events)
+    }
+
+    /// Discover 15-minute crypto markets (convenience wrapper).
+    pub async fn discover_crypto_15min_markets(&self) -> Result<Vec<GammaEvent>> {
+        self.discover_crypto_markets(Self::CRYPTO_ASSETS, "15m", 900).await
     }
     
     /// Internal fetch helper

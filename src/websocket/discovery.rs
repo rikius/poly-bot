@@ -32,16 +32,20 @@ pub struct MarketFilter {
     /// Only include markets with these outcome types
     /// Default: allow all
     pub outcome_types: Option<Vec<OutcomeType>>,
-    
+
+    /// Only include markets whose event slug contains one of these asset names
+    /// (lowercase, e.g. `["btc", "eth"]`).  Empty/None = allow all assets.
+    pub assets: Option<Vec<String>>,
+
     /// Only include markets with minimum 24h volume (in USDC)
     pub min_volume_24h: Option<Decimal>,
-    
+
     /// Only include markets with minimum liquidity (in USDC)
     pub min_liquidity: Option<Decimal>,
-    
+
     /// Only include 15-min crypto markets (fee_rate >= 100 bps)
     pub crypto_15min_only: bool,
-    
+
     /// Maximum number of markets to return
     pub limit: Option<usize>,
 }
@@ -68,6 +72,15 @@ impl MarketFilter {
         }
     }
     
+    /// Only trade markets whose event slug contains one of the given asset names.
+    /// Asset names are normalised to lowercase before comparison.
+    pub fn with_assets(mut self, assets: Vec<String>) -> Self {
+        if !assets.is_empty() {
+            self.assets = Some(assets);
+        }
+        self
+    }
+
     pub fn with_min_volume(mut self, min: Decimal) -> Self {
         self.min_volume_24h = Some(min);
         self
@@ -294,6 +307,44 @@ impl MarketDiscovery {
         self.process_events(events, &filter)
     }
     
+    /// Discover markets using the settings from [`crate::config::Config`].
+    ///
+    /// Reads `market_assets`, `market_timeframe`, `market_interval_secs`, and
+    /// `market_limit` so the caller only needs to pass the config object.
+    pub async fn discover_from_config(
+        &self,
+        assets: &[String],
+        timeframe: &str,
+        interval_secs: u64,
+        limit: usize,
+    ) -> Result<Vec<DiscoveredMarket>> {
+        use crate::websocket::gamma::GammaClient;
+
+        let asset_refs: Vec<&str> = if assets.is_empty() {
+            GammaClient::CRYPTO_ASSETS.to_vec()
+        } else {
+            assets.iter().map(String::as_str).collect()
+        };
+
+        let events = self
+            .gamma_client
+            .discover_crypto_markets(&asset_refs, timeframe, interval_secs)
+            .await?;
+
+        let mut filter = MarketFilter {
+            outcome_types: Some(vec![OutcomeType::UpDown]),
+            crypto_15min_only: false, // timeframe may not be 15m
+            limit: Some(limit),
+            ..Default::default()
+        };
+
+        if !assets.is_empty() {
+            filter = filter.with_assets(assets.to_vec());
+        }
+
+        self.process_events(events, &filter)
+    }
+
     /// Discover markets by event slug
     pub async fn discover_by_slug(&self, slug: &str) -> Result<Vec<DiscoveredMarket>> {
         info!(slug = %slug, "Discovering markets by slug");
@@ -370,26 +421,38 @@ impl MarketDiscovery {
                 return false;
             }
         }
-        
+
+        // Check asset filter — event slug must contain at least one of the requested assets
+        if let Some(ref assets) = filter.assets {
+            let slug_lower = market.event_slug.to_lowercase();
+            let question_lower = market.question.to_lowercase();
+            let matches = assets.iter().any(|a| {
+                slug_lower.contains(a.as_str()) || question_lower.contains(a.as_str())
+            });
+            if !matches {
+                return false;
+            }
+        }
+
         // Check 15-min crypto filter
         if filter.crypto_15min_only && !market.is_crypto_15min {
             return false;
         }
-        
+
         // Check minimum volume
         if let Some(min_volume) = filter.min_volume_24h {
             if market.volume_24h < min_volume {
                 return false;
             }
         }
-        
+
         // Check minimum liquidity
         if let Some(min_liquidity) = filter.min_liquidity {
             if market.liquidity < min_liquidity {
                 return false;
             }
         }
-        
+
         true
     }
 }

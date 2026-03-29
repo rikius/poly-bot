@@ -29,6 +29,7 @@ use rust_decimal_macros::dec;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::constants::EXCHANGE_MIN_ORDER_USDC;
 use crate::ledger::Fill;
 use crate::strategy::edge_calculator::{EdgeCalculator, EdgeConfig};
 use crate::strategy::market_pair::{MarketPair, MarketPairRegistry};
@@ -258,8 +259,22 @@ impl MakerRebateArbStrategy {
             // Truncate (floor) so we never exceed the balance cap.
             .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero);
 
-        if trade_size < self.config.min_position_size {
-            debug!(market = %pair.condition_id, trade_size = %trade_size, "Size below minimum");
+        let cheaper_post = yes_post.min(no_post);
+        let min_by_exchange = if cheaper_post > Decimal::ZERO {
+            (EXCHANGE_MIN_ORDER_USDC / cheaper_post).ceil()
+        } else {
+            Decimal::ONE
+        };
+        let effective_min = min_by_exchange.max(self.config.min_position_size);
+
+        if trade_size < effective_min {
+            debug!(
+                market = %pair.condition_id,
+                trade_size = %trade_size,
+                min_by_exchange = %min_by_exchange,
+                effective_min = %effective_min,
+                "Size below minimum"
+            );
             return None;
         }
 

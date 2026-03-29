@@ -53,6 +53,21 @@ pub struct Config {
     /// Sensitivity parameter: bps_move / sensitivity → probability shift (default 2000)
     pub temporal_arb_sensitivity_bps: i64,
 
+    // Market discovery configuration
+    /// Asset filter: only trade these assets, e.g. ["btc"], ["btc", "eth"].
+    /// Empty = trade all discovered assets.
+    pub market_assets: Vec<String>,
+
+    /// Timeframe for Up/Down markets: "15m", "5m", "1m", etc.
+    /// Must match Polymarket slug convention.
+    pub market_timeframe: String,
+
+    /// Interval in seconds for the chosen timeframe (900 for 15m, 300 for 5m).
+    pub market_interval_secs: u64,
+
+    /// Max number of markets to monitor simultaneously.
+    pub market_limit: usize,
+
     // Alerting configuration
     /// Alert backend: "discord", "telegram", or None
     pub alert_backend: Option<String>,
@@ -162,6 +177,28 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(2000i64);
 
+        // Market discovery
+        // MARKET_ASSETS=BTC,ETH  → ["btc", "eth"]  (empty = all supported assets)
+        let market_assets: Vec<String> = std::env::var("MARKET_ASSETS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        // MARKET_TIMEFRAME=15m  (default "15m")
+        let market_timeframe = std::env::var("MARKET_TIMEFRAME")
+            .unwrap_or_else(|_| "15m".to_string());
+
+        // Derive interval_secs from timeframe string so callers don't have to
+        let market_interval_secs = timeframe_to_secs(&market_timeframe);
+
+        // MARKET_LIMIT=3  (default 5)
+        let market_limit = std::env::var("MARKET_LIMIT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5usize);
+
         // Alerting
         let alert_backend = std::env::var("ALERT_BACKEND").ok();
         let discord_webhook_url = std::env::var("DISCORD_WEBHOOK_URL").ok();
@@ -189,6 +226,10 @@ impl Config {
             temporal_arb_enabled,
             temporal_arb_threshold_bps,
             temporal_arb_sensitivity_bps,
+            market_assets,
+            market_timeframe,
+            market_interval_secs,
+            market_limit,
             alert_backend,
             discord_webhook_url,
             telegram_bot_token,
@@ -258,6 +299,22 @@ impl Config {
             let s = s.trim();
             !s.is_empty() && s != "0x" && s != "0x0" && s.len() > 4
         })
+    }
+}
+
+/// Convert a human-readable timeframe string to seconds.
+/// Supports formats like "15m", "5m", "1h", "1d".
+/// Unknown formats fall back to 900 (15 minutes).
+fn timeframe_to_secs(tf: &str) -> u64 {
+    let tf = tf.trim().to_lowercase();
+    let (digits, unit) = tf.split_at(tf.find(|c: char| !c.is_ascii_digit()).unwrap_or(tf.len()));
+    let n: u64 = digits.parse().unwrap_or(15);
+    match unit {
+        "s" => n,
+        "m" | "min" => n * 60,
+        "h" | "hr" => n * 3600,
+        "d" | "day" => n * 86400,
+        _ => 900,
     }
 }
 

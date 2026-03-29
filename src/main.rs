@@ -2,19 +2,13 @@
 //!
 //! High-frequency trading bot for Polymarket prediction markets.
 
-use alloy_signer_local::PrivateKeySigner;
 use polymarket_bot::api::{run_api_server, ApiState};
 use polymarket_bot::metrics::install_prometheus;
 use polymarket_bot::websocket::MarketDiscovery;
 use polymarket_bot::latency;
 use polymarket_bot::strategy::MarketPair;
-use polymarket_bot::{AuthComponents, Bot, Config, KillSwitch};
-use polymarket_client_sdk::auth::Signer as _;
+use polymarket_bot::{Bot, Config, KillSwitch};
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
-use polymarket_client_sdk::clob::types::SignatureType;
-use polymarket_client_sdk::clob::types::request::{BalanceAllowanceRequest, UpdateBalanceAllowanceRequest};
-use polymarket_client_sdk::POLYGON;
-use std::str::FromStr as _;
 use std::sync::Arc;
 use tokio::signal;
 use tracing::{error, info, warn};
@@ -140,71 +134,19 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Build auth components if a private key is configured.
-    // In paper/simulation mode (no private key) we pass None and Bot::new() will
-    // handle manual credential env vars or operate without credentials.
+    // Authenticate and initialise portfolio (live/private-key mode only).
+    // Paper/simulation mode skips this entirely.
     let auth = if config.has_private_key() {
-        let signer = Arc::new(
-            PrivateKeySigner::from_str(config.private_key.as_ref().unwrap())
-                .expect("Invalid private key")
-                .with_chain_id(Some(POLYGON)),
-        );
-        let creds = clob_client
-            .derive_api_key(signer.as_ref(), None)
-            .await
-            .expect(
-                "Failed to derive API key from private key. \
-                 Ensure your wallet is registered on Polymarket.",
-            );
-
-        info!(api_key = %creds.key(), "L2 credentials derived");
-        let authenticated = clob_client
-            .authentication_builder(signer.as_ref())
-            .credentials(creds.clone())
-            .signature_type(SignatureType::Proxy)
-
-            .authenticate()
-            .await
-            .expect("Failed to create authenticated CLOB client");
-
-        // // Now you can trade!
-        // let order = authenticated.limit_order()
-        //     .token_id("123456".parse()?)
-        //     .price(dec!(0.65))
-        //     .size(dec!(100))
-        //     .side(Side::Buy)
-        //     .build().await?;
-        // let signed = authenticated.sign(&signer, order).await?;
-        // let response = authenticated.post_order(signed).await?;
-
-        match authenticated.api_keys().await {
-            Ok(keys) => info!(endpoint = "api_keys", result = ?keys),
-            Err(e) => error!(endpoint = "api_keys", error = %e),
+        drop(clob_client); // auth.rs creates its own client
+        match polymarket_bot::orchestrator::auth::authenticate(&config, &selected.url).await {
+            Ok(components) => Some(components),
+            Err(e) => {
+                error!("Authentication failed: {}", e);
+                return Err(e);
+            }
         }
-
-        match authenticated
-            .balance_allowance(BalanceAllowanceRequest::default())
-            .await
-        {
-            Ok(b) => info!(endpoint = "balance_allowance", result = ?b),
-            Err(e) => error!(endpoint = "balance_allowance", error = %e),
-        }
-
-        match authenticated
-            .update_balance_allowance(UpdateBalanceAllowanceRequest::default())
-            .await
-        {
-            Ok(b) => info!(endpoint = "update_balance_allowance", result = ?b),
-            Err(e) => error!(endpoint = "update_balance_allowance", error = %e),
-        }
-
-        Some(AuthComponents {
-            clob_client: authenticated,
-            signer,
-            creds,
-        })
     } else {
-        drop(clob_client); // not needed in paper/sim mode
+        drop(clob_client);
         None
     };
 
@@ -215,16 +157,25 @@ async fn main() -> anyhow::Result<()> {
     // Uses slug-based discovery: btc-updown-15m-{timestamp}, etc.
     // ===========================================================================
 
-    info!("Discovering 15-min crypto markets from Gamma API...");
-    
+    info!(
+        timeframe = %config.market_timeframe,
+        assets = ?config.market_assets,
+        limit = config.market_limit,
+        "Discovering crypto markets from Gamma API..."
+    );
+
     let discovery = MarketDiscovery::new();
-    
-    // Discover 15-min crypto markets (Up/Down) using slug pattern discovery
-    let discovered = match discovery.discover_crypto_15min().await {
-        Ok(markets) => {
-            // Limit to first 5 markets
-            markets.into_iter().take(5).collect::<Vec<_>>()
-        }
+
+    let discovered = match discovery
+        .discover_from_config(
+            &config.market_assets,
+            &config.market_timeframe,
+            config.market_interval_secs,
+            config.market_limit,
+        )
+        .await
+    {
+        Ok(markets) => markets,
         Err(e) => {
             warn!("Failed to discover markets from API: {}", e);
             warn!("Falling back to hardcoded test market...");

@@ -1,5 +1,6 @@
 //! Bot construction — authentication, strategy registration, WebSocket setup.
 
+use super::auth::AuthComponents;
 use super::Bot;
 use crate::api::ControlState;
 use crate::config::Config;
@@ -16,108 +17,12 @@ use crate::strategy::{
     StrategyRouter, TemporalArbConfig, TemporalArbStrategy,
 };
 use crate::websocket::{MarketWebSocket, UserWebSocket};
-use alloy_signer_local::PrivateKeySigner;
-use polymarket_client_sdk::auth::{Credentials, Normal};
-use polymarket_client_sdk::auth::state::Authenticated;
-use polymarket_client_sdk::clob::Client as ClobClient;
-use polymarket_client_sdk::clob::types::AssetType;
-use polymarket_client_sdk::clob::types::request::UpdateBalanceAllowanceRequest;
-use rust_decimal::Decimal;
+use polymarket_client_sdk::auth::Credentials;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 use uuid::Uuid;
-
-// ─── Polygon USDC contracts (both variants in circulation) ───────────────────
-/// USDC.e — bridged from Ethereum (historically used by Polymarket)
-const USDC_E_CONTRACT: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
-/// Native USDC — Circle-issued on Polygon (newer)
-const USDC_NATIVE_CONTRACT: &str = "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359";
-/// Free public Polygon RPC endpoints — tried in order until one responds.
-const POLYGON_RPCS: &[&str] = &[
-    "https://rpc.ankr.com/polygon",
-    "https://polygon.llamarpc.com",
-    "https://polygon-bor-rpc.publicnode.com",
-];
-
-/// Read USDC balance for `wallet_address` directly from the Polygon blockchain.
-///
-/// Queries both USDC.e and native USDC contracts via `eth_call` → `balanceOf()`,
-/// summing the results.  Tries multiple public RPC endpoints until one works.
-/// Returns `None` if all RPC calls fail.
-async fn read_usdc_balance_onchain(wallet_address: &str) -> Option<Decimal> {
-    // ABI-encode balanceOf(address):
-    //   selector : 0x70a08231  (keccak256("balanceOf(address)")[..4])
-    //   argument : address padded to 32 bytes (zero-left-padded)
-    let addr_hex = wallet_address.trim_start_matches("0x");
-    let call_data = format!("0x70a08231{:0>64}", addr_hex);
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .ok()?;
-
-    let mut total = Decimal::ZERO;
-
-    for contract in [USDC_E_CONTRACT, USDC_NATIVE_CONTRACT] {
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "eth_call",
-            "params": [{"to": contract, "data": &call_data}, "latest"],
-            "id": 1
-        });
-
-        // Try each RPC endpoint until one returns a valid result.
-        'rpc: for rpc_url in POLYGON_RPCS {
-            match client.post(*rpc_url).json(&body).send().await {
-                Ok(resp) => match resp.json::<serde_json::Value>().await {
-                    Ok(json) => {
-                        if let Some(hex) = json["result"].as_str() {
-                            let raw_hex = hex.trim_start_matches("0x");
-                            if let Ok(raw_units) = u128::from_str_radix(raw_hex, 16) {
-                                // USDC has 6 decimals
-                                let balance = Decimal::from(raw_units)
-                                    / Decimal::from(1_000_000u64);
-                                if balance > Decimal::ZERO {
-                                    info!(
-                                        contract = %contract,
-                                        balance_usdc = %balance,
-                                        "On-chain USDC balance read"
-                                    );
-                                    total += balance;
-                                }
-                                break 'rpc; // got a valid response, no need to try more RPCs
-                            }
-                        }
-                        // Error field in JSON-RPC response — try next endpoint
-                        if json["error"].is_object() {
-                            warn!(rpc = %rpc_url, contract = %contract, "RPC error, trying next endpoint");
-                        }
-                    }
-                    Err(e) => warn!(rpc = %rpc_url, error = %e, "Failed to parse RPC response"),
-                },
-                Err(e) => warn!(rpc = %rpc_url, error = %e, "Polygon RPC call failed"),
-            }
-        }
-    }
-
-    if total > Decimal::ZERO { Some(total) } else { None }
-}
-
-/// Pre-built authentication components created in `main.rs` before `Bot::new()`.
-///
-/// Passing these in avoids a second round-trip to derive API credentials —
-/// `main.rs` already creates an unauthenticated client for the geoblock check,
-/// so we reuse that same connection for auth and hand the result here.
-pub struct AuthComponents {
-    /// Fully authenticated CLOB client ready for order submission.
-    pub clob_client: ClobClient<Authenticated<Normal>>,
-    /// EIP-712 signer derived from the private key.
-    pub signer: Arc<PrivateKeySigner>,
-    /// L2 HMAC credentials derived from the private key.
-    pub creds: Credentials,
-}
 
 impl Bot {
     /// Create a new bot instance.
@@ -233,59 +138,19 @@ impl Bot {
             //   Live mode   — pre-built AuthComponents passed in from main.rs
             //   Sim mode    — use manually-provided POLYMARKET_API_KEY / SECRET / PASSPHRASE
             let (sdk_credentials, maybe_executor) = if config.has_private_key() {
-                // Unpack pre-built components — no extra round-trips needed.
-                let AuthComponents { clob_client, signer, creds } = auth
+                let AuthComponents { clob_client, signer, creds, portfolio_usdc } = auth
                     .expect("AuthComponents must be provided when PRIVATE_KEY is set");
 
-                info!(api_key = %creds.key(), "L2 credentials received");
-
-                // Ensure all on-chain approvals are in place (USDC + CTF for all
-                // Polymarket exchange contracts).  If WALLET_ADDRESS is a proxy
-                // contract this logs guidance instead of sending transactions.
-                let trading_wallet: alloy::primitives::Address = config
-                    .wallet_address
-                    .as_deref()
-                    .unwrap_or("")
-                    .parse()
-                    .unwrap_or(signer.address());
-                super::approvals::ensure_approvals(signer.clone(), trading_wallet).await;
-
-                // Step 1: Tell the CLOB to refresh its on-chain allowance cache.
-                // Without this the API reports balance=0 and rejects every order
-                // even when USDC is present but the allowance cache is stale.
-                if let Err(e) = clob_client
-                    .update_balance_allowance(
-                        UpdateBalanceAllowanceRequest::builder()
-                            .asset_type(AssetType::Collateral)
-                            .build(),
-                    )
-                    .await
-                {
-                    warn!(error = %e, "Could not refresh CLOB balance cache — orders may be rejected");
-                }
-
-                // Step 2: Read wallet USDC balance directly from Polygon blockchain.
-                //
-                // The CLOB `balance_allowance` endpoint returns the *approved* amount
-                // (allowance for the CTF Exchange), which is 0 until the user completes
-                // the one-time "Enable Trading" approval on polymarket.com.
-                // Reading balanceOf() on-chain gives the real spendable USDC regardless
-                // of approval state, so the internal ledger reflects actual funds.
-                let wallet_addr = config.wallet_address.as_deref().unwrap_or("");
-                match read_usdc_balance_onchain(wallet_addr).await {
-                    Some(balance) => {
-                        info!(
-                            balance_usdc = %balance,
-                            "Portfolio balance loaded from on-chain USDC"
-                        );
-                        ledger.sync_cash(balance);
-                    }
-                    None => {
-                        warn!(
-                            fallback_usd = %config.initial_cash_usd,
-                            "Could not read on-chain USDC balance — using INITIAL_CASH_USD as fallback"
-                        );
-                    }
+                // Seed the ledger with the real CLOB balance when available,
+                // otherwise fall back to INITIAL_CASH_USD from config.
+                if let Some(balance) = portfolio_usdc {
+                    ledger.sync_cash(balance);
+                    info!(balance_usdc = %balance, "Ledger seeded from CLOB portfolio balance");
+                } else {
+                    info!(
+                        fallback_usd = %config.initial_cash_usd,
+                        "CLOB balance unavailable — ledger seeded from INITIAL_CASH_USD"
+                    );
                 }
 
                 let policy = Arc::new(DualPolicy::new().with_maker_offset(config.maker_price_offset));

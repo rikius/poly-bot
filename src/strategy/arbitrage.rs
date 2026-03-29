@@ -14,6 +14,7 @@
 //! Returns `Urgency::Immediate` intents → converted to FOK orders by TakerPolicy.
 //! Both legs are grouped so partial fill handling knows they're linked.
 
+use crate::constants::EXCHANGE_MIN_ORDER_USDC;
 use crate::websocket::types::{ConditionId, Side, TokenId};
 use crate::ledger::Fill;
 use crate::strategy::edge_calculator::{EdgeCalculator, EdgeConfig};
@@ -300,11 +301,23 @@ impl MathArbStrategy {
             // Polymarket requires size to have at most 2 decimal places.
             .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero);
 
-        if trade_size < self.config.min_position_size {
+        // Each leg is a separate order; both must meet the exchange's per-order
+        // minimum notional.  Since both legs use the same `trade_size`, the
+        // binding constraint is the cheaper leg (lower price → needs more shares).
+        let cheaper_ask = yes_ask.min(no_ask);
+        let min_by_exchange = if cheaper_ask > Decimal::ZERO {
+            (EXCHANGE_MIN_ORDER_USDC / cheaper_ask).ceil()
+        } else {
+            Decimal::ONE
+        };
+        let effective_min = min_by_exchange.max(self.config.min_position_size);
+
+        if trade_size < effective_min {
             debug!(
                 market = %pair.condition_id,
                 trade_size = %trade_size,
-                min_size = %self.config.min_position_size,
+                min_by_exchange = %min_by_exchange,
+                effective_min = %effective_min,
                 "Trade size below minimum"
             );
             return None;
