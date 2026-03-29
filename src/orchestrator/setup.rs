@@ -20,6 +20,8 @@ use alloy_signer_local::PrivateKeySigner;
 use polymarket_client_sdk::auth::{Credentials, Normal};
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::clob::Client as ClobClient;
+use polymarket_client_sdk::clob::types::AssetType;
+use polymarket_client_sdk::clob::types::request::UpdateBalanceAllowanceRequest;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -154,6 +156,23 @@ impl Bot {
                     .expect("AuthComponents must be provided when PRIVATE_KEY is set");
 
                 info!(api_key = %creds.key(), "L2 credentials received");
+
+                // Refresh the CLOB API's on-chain balance cache.
+                // Without this the API reports balance=0 and rejects every order.
+                // We don't use the returned value — the internal ledger is seeded
+                // from INITIAL_CASH_USD (config.initial_cash_usd) instead.
+                if let Err(e) = clob_client
+                    .update_balance_allowance(
+                        UpdateBalanceAllowanceRequest::builder()
+                            .asset_type(AssetType::Collateral)
+                            .build(),
+                    )
+                    .await
+                {
+                    warn!(error = %e, "Could not refresh CLOB balance cache — orders may be rejected");
+                } else {
+                    info!("CLOB balance cache refreshed");
+                }
 
                 let policy = Arc::new(DualPolicy::new().with_maker_offset(config.maker_price_offset));
                 info!(
