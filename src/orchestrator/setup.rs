@@ -21,12 +21,79 @@ use polymarket_client_sdk::auth::{Credentials, Normal};
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::clob::Client as ClobClient;
 use polymarket_client_sdk::clob::types::AssetType;
-use polymarket_client_sdk::clob::types::request::{BalanceAllowanceRequest, UpdateBalanceAllowanceRequest};
+use polymarket_client_sdk::clob::types::request::UpdateBalanceAllowanceRequest;
+use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 use uuid::Uuid;
+
+// ─── Polygon USDC contracts (both variants in circulation) ───────────────────
+/// USDC.e — bridged from Ethereum (historically used by Polymarket)
+const USDC_E_CONTRACT: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+/// Native USDC — Circle-issued on Polygon (newer)
+const USDC_NATIVE_CONTRACT: &str = "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359";
+/// Public Polygon JSON-RPC endpoint (no API key required)
+const POLYGON_RPC: &str = "https://polygon-rpc.com";
+
+/// Read USDC balance for `wallet_address` directly from the Polygon blockchain.
+///
+/// Queries both USDC.e and native USDC contracts via `eth_call` → `balanceOf()`,
+/// summing the results.  Returns `None` if every RPC call fails.
+async fn read_usdc_balance_onchain(wallet_address: &str) -> Option<Decimal> {
+    // ABI-encode balanceOf(address):
+    //   selector  : 0x70a08231  (keccak256("balanceOf(address)")[..4])
+    //   argument  : address padded to 32 bytes (zero-left-padded)
+    let addr_hex = wallet_address.trim_start_matches("0x");
+    // Pad address to 64 hex chars (32 bytes)
+    let call_data = format!("0x70a08231{:0>64}", addr_hex);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+
+    let mut total = Decimal::ZERO;
+
+    for contract in [USDC_E_CONTRACT, USDC_NATIVE_CONTRACT] {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "eth_call",
+            "params": [{"to": contract, "data": &call_data}, "latest"],
+            "id": 1
+        });
+
+        match client.post(POLYGON_RPC).json(&body).send().await {
+            Ok(resp) => {
+                match resp.json::<serde_json::Value>().await {
+                    Ok(json) => {
+                        if let Some(hex) = json["result"].as_str() {
+                            let raw_hex = hex.trim_start_matches("0x");
+                            if let Ok(raw_units) = u128::from_str_radix(raw_hex, 16) {
+                                // USDC has 6 decimals
+                                let balance = Decimal::from(raw_units)
+                                    / Decimal::from(1_000_000u64);
+                                if balance > Decimal::ZERO {
+                                    info!(
+                                        contract = %contract,
+                                        balance_usdc = %balance,
+                                        "On-chain USDC balance read"
+                                    );
+                                    total += balance;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => warn!(error = %e, contract = %contract, "Failed to parse RPC response"),
+                }
+            }
+            Err(e) => warn!(error = %e, contract = %contract, "Polygon RPC call failed"),
+        }
+    }
+
+    if total > Decimal::ZERO { Some(total) } else { None }
+}
 
 /// Pre-built authentication components created in `main.rs` before `Bot::new()`.
 ///
@@ -157,8 +224,9 @@ impl Bot {
 
                 info!(api_key = %creds.key(), "L2 credentials received");
 
-                // Step 1: Tell the CLOB to refresh its on-chain balance cache.
-                // Without this the API reports balance=0 and rejects every order.
+                // Step 1: Tell the CLOB to refresh its on-chain allowance cache.
+                // Without this the API reports balance=0 and rejects every order
+                // even when USDC is present but the allowance cache is stale.
                 if let Err(e) = clob_client
                     .update_balance_allowance(
                         UpdateBalanceAllowanceRequest::builder()
@@ -170,29 +238,26 @@ impl Bot {
                     warn!(error = %e, "Could not refresh CLOB balance cache — orders may be rejected");
                 }
 
-                // Step 2: Read back the refreshed balance and sync the ledger.
-                // This seeds the internal ledger with the wallet's actual deposited
-                // USDC so strategy size caps reflect real available funds.
-                match clob_client
-                    .balance_allowance(
-                        BalanceAllowanceRequest::builder()
-                            .asset_type(AssetType::Collateral)
-                            .build(),
-                    )
-                    .await
-                {
-                    Ok(resp) => {
+                // Step 2: Read wallet USDC balance directly from Polygon blockchain.
+                //
+                // The CLOB `balance_allowance` endpoint returns the *approved* amount
+                // (allowance for the CTF Exchange), which is 0 until the user completes
+                // the one-time "Enable Trading" approval on polymarket.com.
+                // Reading balanceOf() on-chain gives the real spendable USDC regardless
+                // of approval state, so the internal ledger reflects actual funds.
+                let wallet_addr = config.wallet_address.as_deref().unwrap_or("");
+                match read_usdc_balance_onchain(wallet_addr).await {
+                    Some(balance) => {
                         info!(
-                            balance_usdc = %resp.balance,
-                            "Portfolio balance loaded from Polymarket CLOB"
+                            balance_usdc = %balance,
+                            "Portfolio balance loaded from on-chain USDC"
                         );
-                        ledger.sync_cash(resp.balance);
+                        ledger.sync_cash(balance);
                     }
-                    Err(e) => {
+                    None => {
                         warn!(
-                            error = %e,
                             fallback_usd = %config.initial_cash_usd,
-                            "Could not read CLOB balance — using INITIAL_CASH_USD as fallback"
+                            "Could not read on-chain USDC balance — using INITIAL_CASH_USD as fallback"
                         );
                     }
                 }
