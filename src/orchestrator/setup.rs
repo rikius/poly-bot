@@ -20,7 +20,7 @@ use alloy_signer_local::PrivateKeySigner;
 use polymarket_client_sdk::auth::{Credentials, Signer as _};
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::clob::types::AssetType;
-use polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest;
+use polymarket_client_sdk::clob::types::request::{BalanceAllowanceRequest, UpdateBalanceAllowanceRequest};
 use polymarket_client_sdk::POLYGON;
 use std::collections::HashMap;
 use std::str::FromStr as _;
@@ -163,14 +163,19 @@ impl Bot {
                 info!(api_key = %creds.key(), "L2 credentials derived");
 
                 // Sync ledger cash to the actual Polymarket USDC balance.
-                match clob_client
-                    .balance_allowance(
-                        BalanceAllowanceRequest::builder()
-                            .asset_type(AssetType::Collateral)
-                            .build(),
-                    )
+                // The CLOB API caches the on-chain balance; call update first to refresh it.
+                let balance_req = BalanceAllowanceRequest::builder()
+                    .asset_type(AssetType::Collateral)
+                    .build();
+                if let Err(e) = clob_client
+                    .update_balance_allowance(UpdateBalanceAllowanceRequest::builder()
+                        .asset_type(AssetType::Collateral)
+                        .build())
                     .await
                 {
+                    warn!(error = %e, "Could not trigger balance cache refresh; balance may be stale");
+                }
+                match clob_client.balance_allowance(balance_req).await {
                     Ok(resp) => {
                         info!(
                             balance_usdc = %resp.balance,
