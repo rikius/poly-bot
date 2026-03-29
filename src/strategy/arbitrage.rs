@@ -284,7 +284,9 @@ impl MathArbStrategy {
             .min(max_by_config)
             .min(max_by_exposure)
             .min(max_by_balance)
-            .max(Decimal::ZERO);
+            .max(Decimal::ZERO)
+            // Polymarket requires size to have at most 2 decimal places.
+            .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero);
 
         if trade_size < self.config.min_position_size {
             debug!(

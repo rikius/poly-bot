@@ -239,7 +239,10 @@ impl MakerRebateArbStrategy {
             .min(self.config.max_position_size)
             .min(max_by_exposure)
             .min(max_by_balance)
-            .max(Decimal::ZERO);
+            .max(Decimal::ZERO)
+            // Polymarket requires size to have at most 2 decimal places.
+            // Truncate (floor) so we never exceed the balance cap.
+            .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero);
 
         if trade_size < self.config.min_position_size {
             debug!(market = %pair.condition_id, trade_size = %trade_size, "Size below minimum");
