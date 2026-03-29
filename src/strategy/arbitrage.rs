@@ -273,10 +273,17 @@ impl MathArbStrategy {
             let current = *self.current_exposure.read().unwrap();
             (self.config.max_total_exposure - current) / dec!(2) // Divided by 2 since we're buying both sides
         };
+        let combined_ask = yes_ask + no_ask;
+        let max_by_balance = if combined_ask > Decimal::ZERO {
+            ctx.available_cash() / combined_ask
+        } else {
+            Decimal::ZERO
+        };
 
         let trade_size = max_by_book
             .min(max_by_config)
             .min(max_by_exposure)
+            .min(max_by_balance)
             .max(Decimal::ZERO);
 
         if trade_size < self.config.min_position_size {
@@ -290,7 +297,7 @@ impl MathArbStrategy {
         }
 
         // Check exposure limit
-        let total_notional = (yes_ask + no_ask) * trade_size;
+        let total_notional = combined_ask * trade_size;
         if !self.check_exposure_limit(total_notional) {
             let current = *self.current_exposure.read().unwrap();
             debug!(
@@ -334,7 +341,8 @@ impl MathArbStrategy {
             self.name.clone(),
         )
         .with_group(group_id.clone())
-        .with_priority(100); // High priority for arb
+        .with_priority(100) // High priority for arb
+        .with_tick_size(pair.tick_size);
 
         let no_intent = OrderIntent::new(
             pair.condition_id.clone(),
@@ -347,7 +355,8 @@ impl MathArbStrategy {
             self.name.clone(),
         )
         .with_group(group_id)
-        .with_priority(100);
+        .with_priority(100)
+        .with_tick_size(pair.tick_size);
 
         // Record trade for cooldown
         self.record_trade(&pair.condition_id);

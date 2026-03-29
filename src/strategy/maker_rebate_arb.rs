@@ -157,8 +157,16 @@ impl MakerRebateArbStrategy {
 
     /// Compute maker BUY posting price: one tick below the best ask, but
     /// never lower than the current best bid (to stay competitive).
-    fn maker_price(best_ask: Decimal, best_bid: Decimal) -> Decimal {
-        (best_ask - dec!(0.01)).max(best_bid)
+    /// Result is always aligned to `tick_size`.
+    fn maker_price(best_ask: Decimal, best_bid: Decimal, tick_size: Decimal) -> Decimal {
+        let one_tick_below = best_ask - tick_size;
+        let raw = one_tick_below.max(best_bid);
+        // Floor to tick boundary — best_bid may also have sub-tick precision
+        if tick_size.is_zero() {
+            raw
+        } else {
+            (raw / tick_size).floor() * tick_size
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -183,9 +191,9 @@ impl MakerRebateArbStrategy {
         let no_ask = no_book.best_ask()?;
         let no_bid = no_book.best_bid()?;
 
-        // Prices we will actually post
-        let yes_post = Self::maker_price(yes_ask, yes_bid);
-        let no_post = Self::maker_price(no_ask, no_bid);
+        // Prices we will actually post (tick-aligned)
+        let yes_post = Self::maker_price(yes_ask, yes_bid, pair.tick_size);
+        let no_post = Self::maker_price(no_ask, no_bid, pair.tick_size);
         let combined_cost = yes_post + no_post;
         let edge = dec!(1) - combined_cost;
 
@@ -221,10 +229,16 @@ impl MakerRebateArbStrategy {
             let current = *self.current_exposure.read().unwrap();
             (self.config.max_total_exposure - current) / dec!(2)
         };
+        let max_by_balance = if combined_cost > Decimal::ZERO {
+            ctx.available_cash() / combined_cost
+        } else {
+            Decimal::ZERO
+        };
         let trade_size = calc
             .max_size
             .min(self.config.max_position_size)
             .min(max_by_exposure)
+            .min(max_by_balance)
             .max(Decimal::ZERO);
 
         if trade_size < self.config.min_position_size {
@@ -268,7 +282,8 @@ impl MakerRebateArbStrategy {
             self.name.clone(),
         )
         .with_group(group_id.clone())
-        .with_priority(90);
+        .with_priority(90)
+        .with_tick_size(pair.tick_size);
 
         let no_intent = OrderIntent::new(
             pair.condition_id.clone(),
@@ -285,7 +300,8 @@ impl MakerRebateArbStrategy {
             self.name.clone(),
         )
         .with_group(group_id)
-        .with_priority(90);
+        .with_priority(90)
+        .with_tick_size(pair.tick_size);
 
         // Register pending arb for TTL tracking
         self.pending_arbs.insert(
@@ -685,12 +701,12 @@ mod tests {
     fn test_maker_price_helper() {
         // Standard case: 1-cent spread
         assert_eq!(
-            MakerRebateArbStrategy::maker_price(dec!(0.48), dec!(0.47)),
+            MakerRebateArbStrategy::maker_price(dec!(0.48), dec!(0.47), dec!(0.01)),
             dec!(0.47)
         );
         // Tight spread (ask - tick would be below bid) → clamp to bid
         assert_eq!(
-            MakerRebateArbStrategy::maker_price(dec!(0.50), dec!(0.50)),
+            MakerRebateArbStrategy::maker_price(dec!(0.50), dec!(0.50), dec!(0.01)),
             dec!(0.50) // ask - tick = 0.49 < bid 0.50, clamped
         );
     }
