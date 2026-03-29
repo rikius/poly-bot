@@ -17,17 +17,30 @@ use crate::strategy::{
 };
 use crate::websocket::{MarketWebSocket, UserWebSocket};
 use alloy_signer_local::PrivateKeySigner;
-use polymarket_client_sdk::auth::{Credentials, Signer as _};
-use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
+use polymarket_client_sdk::auth::{Credentials, Normal};
+use polymarket_client_sdk::auth::state::Authenticated;
+use polymarket_client_sdk::clob::Client as ClobClient;
 use polymarket_client_sdk::clob::types::AssetType;
 use polymarket_client_sdk::clob::types::request::{BalanceAllowanceRequest, UpdateBalanceAllowanceRequest};
-use polymarket_client_sdk::POLYGON;
 use std::collections::HashMap;
-use std::str::FromStr as _;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 use uuid::Uuid;
+
+/// Pre-built authentication components created in `main.rs` before `Bot::new()`.
+///
+/// Passing these in avoids a second round-trip to derive API credentials —
+/// `main.rs` already creates an unauthenticated client for the geoblock check,
+/// so we reuse that same connection for auth and hand the result here.
+pub struct AuthComponents {
+    /// Fully authenticated CLOB client ready for order submission.
+    pub clob_client: ClobClient<Authenticated<Normal>>,
+    /// EIP-712 signer derived from the private key.
+    pub signer: Arc<PrivateKeySigner>,
+    /// L2 HMAC credentials derived from the private key.
+    pub creds: Credentials,
+}
 
 impl Bot {
     /// Create a new bot instance.
@@ -37,13 +50,14 @@ impl Bot {
     /// * `kill_switch` - Kill switch for emergency stop
     /// * `token_ids` - Token IDs to subscribe to (alternating YES/NO pairs)
     /// * `market_pairs` - Market pair definitions for arb detection
-    /// * `clob_url` - Polymarket CLOB API base URL
+    /// * `auth` - Pre-built auth components from `main.rs` (Some in live/private-key mode,
+    ///            None in simulation/paper mode without a private key)
     pub async fn new(
         config: Config,
         kill_switch: Arc<KillSwitch>,
         token_ids: Vec<String>,
         market_pairs: Vec<MarketPair>,
-        clob_url: &str,
+        auth: Option<AuthComponents>,
     ) -> Self {
         let config = Arc::new(config);
         let order_book_state = Arc::new(OrderBookState::new());
@@ -134,33 +148,14 @@ impl Bot {
         // Authenticate and set up executor + user WS only if credentials are available
         let (executor, user_ws_rx, user_ws_task) = if config.has_credentials() {
             // Resolve L2 credentials:
-            //   Live mode   — derive from private key via Polymarket API
+            //   Live mode   — pre-built AuthComponents passed in from main.rs
             //   Sim mode    — use manually-provided POLYMARKET_API_KEY / SECRET / PASSPHRASE
             let (sdk_credentials, maybe_executor) = if config.has_private_key() {
-                let signer = Arc::new(
-                    PrivateKeySigner::from_str(config.private_key.as_ref().unwrap())
-                        .expect("Invalid private key")
-                        .with_chain_id(Some(POLYGON)),
-                );
+                // Unpack pre-built components — no extra round-trips needed.
+                let AuthComponents { clob_client, signer, creds } = auth
+                    .expect("AuthComponents must be provided when PRIVATE_KEY is set");
 
-                // Derive credentials without the noisy create-first fallback.
-                let unauth_client = ClobClient::new(clob_url, ClobConfig::default())
-                    .expect("Failed to create CLOB client");
-                let creds = unauth_client
-                    .derive_api_key(signer.as_ref(), None)
-                    .await
-                    .expect(
-                        "Failed to derive API key from private key. \
-                         Ensure your wallet is registered on Polymarket.",
-                    );
-                let clob_client = unauth_client
-                    .authentication_builder(signer.as_ref())
-                    .credentials(creds.clone())
-                    .authenticate()
-                    .await
-                    .expect("Failed to create authenticated CLOB client");
-
-                info!(api_key = %creds.key(), "L2 credentials derived");
+                info!(api_key = %creds.key(), "L2 credentials received");
 
                 // Sync ledger cash to the actual Polymarket USDC balance.
                 // The CLOB API caches the on-chain balance; call update first to refresh it.

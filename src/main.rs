@@ -2,13 +2,17 @@
 //!
 //! High-frequency trading bot for Polymarket prediction markets.
 
+use alloy_signer_local::PrivateKeySigner;
 use polymarket_bot::api::{run_api_server, ApiState};
 use polymarket_bot::metrics::install_prometheus;
 use polymarket_bot::websocket::MarketDiscovery;
 use polymarket_bot::latency;
 use polymarket_bot::strategy::MarketPair;
-use polymarket_bot::{Bot, Config, KillSwitch};
+use polymarket_bot::{AuthComponents, Bot, Config, KillSwitch};
+use polymarket_client_sdk::auth::Signer as _;
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
+use polymarket_client_sdk::POLYGON;
+use std::str::FromStr as _;
 use std::sync::Arc;
 use tokio::signal;
 use tracing::{error, info, warn};
@@ -100,35 +104,72 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // ===========================================================================
-    // GEOBLOCK CHECK — verify trading is allowed from this IP
+    // GEOBLOCK CHECK + AUTH — single client for both
+    //
+    // We create one unauthenticated ClobClient here.  It is used for:
+    //   1. Geoblock check (borrows the client)
+    //   2. Credential derivation + authentication (consumes the client)
+    // This avoids the duplicate client creation that previously happened inside
+    // Bot::new().
     // ===========================================================================
-    {
-        let clob_client = ClobClient::new(&selected.url, ClobConfig::default())
-            .expect("Failed to create CLOB client for geoblock check");
+    let clob_client = ClobClient::new(&selected.url, ClobConfig::default())
+        .expect("Failed to create CLOB client");
 
-        match clob_client.check_geoblock().await {
-            Ok(geo) => {
-                if geo.blocked {
-                    error!(
-                        "Trading not available from {} (IP: {}, region: {})",
-                        geo.country, geo.ip, geo.region
-                    );
-                    return Err(anyhow::anyhow!(
-                        "Geoblocked: trading not available in {}/{}",
-                        geo.country,
-                        geo.region
-                    ));
-                }
-                info!(
-                    "Geoblock check passed (IP: {}, country: {}, region: {})",
-                    geo.ip, geo.country, geo.region
+    match clob_client.check_geoblock().await {
+        Ok(geo) => {
+            if geo.blocked {
+                error!(
+                    "Trading not available from {} (IP: {}, region: {})",
+                    geo.country, geo.ip, geo.region
                 );
+                return Err(anyhow::anyhow!(
+                    "Geoblocked: trading not available in {}/{}",
+                    geo.country,
+                    geo.region
+                ));
             }
-            Err(e) => {
-                warn!("Geoblock check failed (proceeding anyway): {}", e);
-            }
+            info!(
+                "Geoblock check passed (IP: {}, country: {}, region: {})",
+                geo.ip, geo.country, geo.region
+            );
+        }
+        Err(e) => {
+            warn!("Geoblock check failed (proceeding anyway): {}", e);
         }
     }
+
+    // Build auth components if a private key is configured.
+    // In paper/simulation mode (no private key) we pass None and Bot::new() will
+    // handle manual credential env vars or operate without credentials.
+    let auth = if config.has_private_key() {
+        let signer = Arc::new(
+            PrivateKeySigner::from_str(config.private_key.as_ref().unwrap())
+                .expect("Invalid private key")
+                .with_chain_id(Some(POLYGON)),
+        );
+        let creds = clob_client
+            .derive_api_key(signer.as_ref(), None)
+            .await
+            .expect(
+                "Failed to derive API key from private key. \
+                 Ensure your wallet is registered on Polymarket.",
+            );
+        info!(api_key = %creds.key(), "L2 credentials derived");
+        let authenticated = clob_client
+            .authentication_builder(signer.as_ref())
+            .credentials(creds.clone())
+            .authenticate()
+            .await
+            .expect("Failed to create authenticated CLOB client");
+        Some(AuthComponents {
+            clob_client: authenticated,
+            signer,
+            creds,
+        })
+    } else {
+        drop(clob_client); // not needed in paper/sim mode
+        None
+    };
 
     // ===========================================================================
     // MARKET DISCOVERY
@@ -210,8 +251,8 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Registered {} market pair(s) with {} token(s)", market_pairs.len(), token_ids.len());
 
-    // Create the bot
-    let mut bot = Bot::new(config, kill_switch.clone(), token_ids, market_pairs, &selected.url).await;
+    // Create the bot (auth components pre-built above, or None for paper/sim mode)
+    let mut bot = Bot::new(config, kill_switch.clone(), token_ids, market_pairs, auth).await;
 
     // Start API server (shares read-only views of bot state)
     {

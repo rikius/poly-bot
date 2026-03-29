@@ -29,6 +29,7 @@ pub mod strategy;
 pub mod websocket;
 
 pub use orchestrator::Bot;
+pub use orchestrator::AuthComponents;
 pub use config::Config;
 pub use error::{BotError, Result};
 pub use kill_switch::KillSwitch;

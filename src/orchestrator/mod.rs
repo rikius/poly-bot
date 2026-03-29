@@ -21,6 +21,8 @@ mod heartbeat;
 mod setup;
 mod shutdown;
 
+pub use setup::AuthComponents;
+
 use crate::alerts::AlertSender;
 use crate::api::ControlState;
 use crate::config::Config;
