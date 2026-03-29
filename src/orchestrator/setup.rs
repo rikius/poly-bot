@@ -34,19 +34,23 @@ use uuid::Uuid;
 const USDC_E_CONTRACT: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 /// Native USDC — Circle-issued on Polygon (newer)
 const USDC_NATIVE_CONTRACT: &str = "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359";
-/// Public Polygon JSON-RPC endpoint (no API key required)
-const POLYGON_RPC: &str = "https://polygon-rpc.com";
+/// Free public Polygon RPC endpoints — tried in order until one responds.
+const POLYGON_RPCS: &[&str] = &[
+    "https://rpc.ankr.com/polygon",
+    "https://polygon.llamarpc.com",
+    "https://polygon-bor-rpc.publicnode.com",
+];
 
 /// Read USDC balance for `wallet_address` directly from the Polygon blockchain.
 ///
 /// Queries both USDC.e and native USDC contracts via `eth_call` → `balanceOf()`,
-/// summing the results.  Returns `None` if every RPC call fails.
+/// summing the results.  Tries multiple public RPC endpoints until one works.
+/// Returns `None` if all RPC calls fail.
 async fn read_usdc_balance_onchain(wallet_address: &str) -> Option<Decimal> {
     // ABI-encode balanceOf(address):
-    //   selector  : 0x70a08231  (keccak256("balanceOf(address)")[..4])
-    //   argument  : address padded to 32 bytes (zero-left-padded)
+    //   selector : 0x70a08231  (keccak256("balanceOf(address)")[..4])
+    //   argument : address padded to 32 bytes (zero-left-padded)
     let addr_hex = wallet_address.trim_start_matches("0x");
-    // Pad address to 64 hex chars (32 bytes)
     let call_data = format!("0x70a08231{:0>64}", addr_hex);
 
     let client = reqwest::Client::builder()
@@ -64,9 +68,10 @@ async fn read_usdc_balance_onchain(wallet_address: &str) -> Option<Decimal> {
             "id": 1
         });
 
-        match client.post(POLYGON_RPC).json(&body).send().await {
-            Ok(resp) => {
-                match resp.json::<serde_json::Value>().await {
+        // Try each RPC endpoint until one returns a valid result.
+        'rpc: for rpc_url in POLYGON_RPCS {
+            match client.post(*rpc_url).json(&body).send().await {
+                Ok(resp) => match resp.json::<serde_json::Value>().await {
                     Ok(json) => {
                         if let Some(hex) = json["result"].as_str() {
                             let raw_hex = hex.trim_start_matches("0x");
@@ -82,13 +87,18 @@ async fn read_usdc_balance_onchain(wallet_address: &str) -> Option<Decimal> {
                                     );
                                     total += balance;
                                 }
+                                break 'rpc; // got a valid response, no need to try more RPCs
                             }
                         }
+                        // Error field in JSON-RPC response — try next endpoint
+                        if json["error"].is_object() {
+                            warn!(rpc = %rpc_url, contract = %contract, "RPC error, trying next endpoint");
+                        }
                     }
-                    Err(e) => warn!(error = %e, contract = %contract, "Failed to parse RPC response"),
-                }
+                    Err(e) => warn!(rpc = %rpc_url, error = %e, "Failed to parse RPC response"),
+                },
+                Err(e) => warn!(rpc = %rpc_url, error = %e, "Polygon RPC call failed"),
             }
-            Err(e) => warn!(error = %e, contract = %contract, "Polygon RPC call failed"),
         }
     }
 
@@ -225,9 +235,15 @@ impl Bot {
                 info!(api_key = %creds.key(), "L2 credentials received");
 
                 // Ensure all on-chain approvals are in place (USDC + CTF for all
-                // Polymarket exchange contracts).  Sends transactions only when an
-                // approval is missing, so this is safe to run on every startup.
-                super::approvals::ensure_approvals(signer.clone()).await;
+                // Polymarket exchange contracts).  If WALLET_ADDRESS is a proxy
+                // contract this logs guidance instead of sending transactions.
+                let trading_wallet: alloy::primitives::Address = config
+                    .wallet_address
+                    .as_deref()
+                    .unwrap_or("")
+                    .parse()
+                    .unwrap_or(signer.address());
+                super::approvals::ensure_approvals(signer.clone(), trading_wallet).await;
 
                 // Step 1: Tell the CLOB to refresh its on-chain allowance cache.
                 // Without this the API reports balance=0 and rejects every order
