@@ -21,7 +21,7 @@ use polymarket_client_sdk::auth::{Credentials, Normal};
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::clob::Client as ClobClient;
 use polymarket_client_sdk::clob::types::AssetType;
-use polymarket_client_sdk::clob::types::request::UpdateBalanceAllowanceRequest;
+use polymarket_client_sdk::clob::types::request::{BalanceAllowanceRequest, UpdateBalanceAllowanceRequest};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -157,10 +157,8 @@ impl Bot {
 
                 info!(api_key = %creds.key(), "L2 credentials received");
 
-                // Refresh the CLOB API's on-chain balance cache.
+                // Step 1: Tell the CLOB to refresh its on-chain balance cache.
                 // Without this the API reports balance=0 and rejects every order.
-                // We don't use the returned value — the internal ledger is seeded
-                // from INITIAL_CASH_USD (config.initial_cash_usd) instead.
                 if let Err(e) = clob_client
                     .update_balance_allowance(
                         UpdateBalanceAllowanceRequest::builder()
@@ -170,8 +168,33 @@ impl Bot {
                     .await
                 {
                     warn!(error = %e, "Could not refresh CLOB balance cache — orders may be rejected");
-                } else {
-                    info!("CLOB balance cache refreshed");
+                }
+
+                // Step 2: Read back the refreshed balance and sync the ledger.
+                // This seeds the internal ledger with the wallet's actual deposited
+                // USDC so strategy size caps reflect real available funds.
+                match clob_client
+                    .balance_allowance(
+                        BalanceAllowanceRequest::builder()
+                            .asset_type(AssetType::Collateral)
+                            .build(),
+                    )
+                    .await
+                {
+                    Ok(resp) => {
+                        info!(
+                            balance_usdc = %resp.balance,
+                            "Portfolio balance loaded from Polymarket CLOB"
+                        );
+                        ledger.sync_cash(resp.balance);
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            fallback_usd = %config.initial_cash_usd,
+                            "Could not read CLOB balance — using INITIAL_CASH_USD as fallback"
+                        );
+                    }
                 }
 
                 let policy = Arc::new(DualPolicy::new().with_maker_offset(config.maker_price_offset));
