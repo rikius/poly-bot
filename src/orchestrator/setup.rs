@@ -13,8 +13,10 @@ use crate::metrics::BotLatency;
 use crate::risk::CircuitBreaker;
 use crate::state::OrderBookState;
 use crate::strategy::{
+    ContrarianConfig, ContrarianStrategy, LateEntryConfig, LateEntryStrategy,
     MakerRebateArbStrategy, MakerRebateConfig, MarketPair, MarketPairRegistry, MathArbStrategy,
-    StrategyRouter, TemporalArbConfig, TemporalArbStrategy,
+    StrategyRouter, TboConfig, TboTrendStrategy, TbtConfig, TbtDivergenceStrategy,
+    TemporalArbConfig, TemporalArbStrategy,
 };
 use crate::websocket::{MarketWebSocket, UserWebSocket};
 use polymarket_client_sdk::auth::Credentials;
@@ -60,21 +62,23 @@ impl Bot {
         // Set up strategy router
         let strategy_router = Arc::new(StrategyRouter::new());
 
-        // Register MathArbStrategy
-        let arb_config = if config.use_maker_mode {
-            info!("Using MAKER mode for arb strategy (1% min edge, GTC orders, 0% fees)");
-            crate::strategy::MathArbConfig::maker()
-        } else {
-            info!("Using TAKER mode for arb strategy (3% min edge, FOK orders)");
-            crate::strategy::MathArbConfig::taker()
-        };
-        let arb_config = crate::strategy::MathArbConfig {
-            max_bet_usd: config.max_bet_usd,
-            ..arb_config
-        };
-        let math_arb = Arc::new(MathArbStrategy::with_config(market_registry.clone(), arb_config));
-        if let Err(e) = strategy_router.register(math_arb) {
-            warn!("Failed to register MathArbStrategy: {}", e);
+        // Optionally register MathArbStrategy (MATH_ARB_ENABLED, default true)
+        if config.math_arb_enabled {
+            let arb_config = if config.use_maker_mode {
+                info!("Using MAKER mode for arb strategy (1% min edge, GTC orders, 0% fees)");
+                crate::strategy::MathArbConfig::maker()
+            } else {
+                info!("Using TAKER mode for arb strategy (3% min edge, FOK orders)");
+                crate::strategy::MathArbConfig::taker()
+            };
+            let arb_config = crate::strategy::MathArbConfig {
+                max_bet_usd: config.max_bet_usd,
+                ..arb_config
+            };
+            let math_arb = Arc::new(MathArbStrategy::with_config(market_registry.clone(), arb_config));
+            if let Err(e) = strategy_router.register(math_arb) {
+                warn!("Failed to register MathArbStrategy: {}", e);
+            }
         }
 
         // Shared external price store (populated by Binance feed when enabled)
@@ -126,6 +130,122 @@ impl Bot {
             });
         }
 
+        // Optionally register ContrarianStrategy (mean-reversion / fade-the-crowd)
+        if config.contrarian_enabled {
+            info!(
+                min_move_bps = config.contrarian_min_move_bps,
+                lookback_secs = config.contrarian_lookback_secs,
+                "Registering ContrarianStrategy"
+            );
+            let contrarian_config = ContrarianConfig {
+                min_move_bps: config.contrarian_min_move_bps,
+                lookback_secs: config.contrarian_lookback_secs,
+                max_bet_usd: config.contrarian_max_bet_usd,
+                max_hold_secs: config.contrarian_max_hold_secs,
+                profit_target_pct: config.contrarian_profit_target_pct,
+                stop_loss_pct: config.contrarian_stop_loss_pct,
+                min_edge: config.contrarian_min_edge,
+                high_fee_min_edge: config.contrarian_high_fee_min_edge,
+                cooldown_ms: config.contrarian_cooldown_ms,
+                ..ContrarianConfig::default()
+            };
+            let contrarian = Arc::new(ContrarianStrategy::with_config(
+                market_registry.clone(),
+                contrarian_config,
+            ));
+            if let Err(e) = strategy_router.register(contrarian) {
+                warn!("Failed to register ContrarianStrategy: {}", e);
+            }
+        }
+
+        // Optionally register TboTrendStrategy (trending breakout / momentum)
+        if config.tbo_enabled {
+            info!(
+                lookback_ticks = config.tbo_lookback_ticks,
+                breakout_threshold_bps = config.tbo_breakout_threshold_bps,
+                min_confirm_ticks = config.tbo_min_confirm_ticks,
+                "Registering TboTrendStrategy"
+            );
+            let tbo_config = TboConfig {
+                lookback_ticks: config.tbo_lookback_ticks,
+                breakout_threshold_bps: config.tbo_breakout_threshold_bps,
+                min_confirm_ticks: config.tbo_min_confirm_ticks,
+                max_bet_usd: config.tbo_max_bet_usd,
+                max_hold_secs: config.tbo_max_hold_secs,
+                profit_target_pct: config.tbo_profit_target_pct,
+                stop_loss_pct: config.tbo_stop_loss_pct,
+                min_ask_depth: config.tbo_min_ask_depth,
+                cooldown_ms: config.tbo_cooldown_ms,
+                ..TboConfig::default()
+            };
+            let tbo = Arc::new(TboTrendStrategy::with_config(
+                market_registry.clone(),
+                tbo_config,
+            ));
+            if let Err(e) = strategy_router.register(tbo) {
+                warn!("Failed to register TboTrendStrategy: {}", e);
+            }
+        }
+
+        // Optionally register TbtDivergenceStrategy (RSI divergence + late entry)
+        if config.tbt_enabled {
+            info!(
+                lookback_ticks = config.tbt_lookback_ticks,
+                rsi_period = config.tbt_rsi_period,
+                divergence_min_gap_bps = config.tbt_divergence_min_gap_bps,
+                pullback_bps = config.tbt_pullback_bps,
+                "Registering TbtDivergenceStrategy"
+            );
+            let tbt_config = TbtConfig {
+                lookback_ticks: config.tbt_lookback_ticks,
+                rsi_period: config.tbt_rsi_period,
+                divergence_min_gap_bps: config.tbt_divergence_min_gap_bps,
+                pullback_bps: config.tbt_pullback_bps,
+                signal_expiry_ticks: config.tbt_signal_expiry_ticks,
+                max_bet_usd: config.tbt_max_bet_usd,
+                max_hold_secs: config.tbt_max_hold_secs,
+                profit_target_pct: config.tbt_profit_target_pct,
+                stop_loss_pct: config.tbt_stop_loss_pct,
+                min_ask_depth: config.tbt_min_ask_depth,
+                cooldown_ms: config.tbt_cooldown_ms,
+                ..TbtConfig::default()
+            };
+            let tbt = Arc::new(TbtDivergenceStrategy::with_config(
+                market_registry.clone(),
+                tbt_config,
+            ));
+            if let Err(e) = strategy_router.register(tbt) {
+                warn!("Failed to register TbtDivergenceStrategy: {}", e);
+            }
+        }
+
+        // Optionally register LateEntryStrategy (high-confidence near-resolution betting)
+        if config.late_entry_enabled {
+            info!(
+                entry_window_pct = config.late_entry_window_pct,
+                entry_window_secs = (config.market_interval_secs as f64 * config.late_entry_window_pct) as u64,
+                min_entry_price = %config.late_entry_min_entry_price,
+                "Registering LateEntryStrategy"
+            );
+            let late_config = LateEntryConfig {
+                entry_window_pct: config.late_entry_window_pct,
+                min_entry_price: config.late_entry_min_entry_price,
+                market_interval_secs: config.market_interval_secs,
+                max_bet_usd: config.late_entry_max_bet_usd,
+                min_ask_depth: config.late_entry_min_ask_depth,
+                cooldown_ms: config.late_entry_cooldown_ms,
+                stop_loss_price: config.late_entry_stop_loss_price,
+                ..LateEntryConfig::default()
+            };
+            let late = Arc::new(LateEntryStrategy::with_config(
+                market_registry.clone(),
+                late_config,
+            ));
+            if let Err(e) = strategy_router.register(late) {
+                warn!("Failed to register LateEntryStrategy: {}", e);
+            }
+        }
+
         let circuit_breaker = Arc::new(CircuitBreaker::new());
         let order_tracker = Arc::new(OrderTracker::new());
         let latency = BotLatency::new();
@@ -138,7 +258,7 @@ impl Bot {
             //   Live mode   — pre-built AuthComponents passed in from main.rs
             //   Sim mode    — use manually-provided POLYMARKET_API_KEY / SECRET / PASSPHRASE
             let (sdk_credentials, maybe_executor) = if config.has_private_key() {
-                let AuthComponents { clob_client, signer, creds, portfolio_usdc } = auth
+                let AuthComponents { clob_client, sync_client, signer, creds, portfolio_usdc, recent_fills } = auth
                     .expect("AuthComponents must be provided when PRIVATE_KEY is set");
 
                 // Seed the ledger with the real CLOB balance when available,
@@ -153,11 +273,25 @@ impl Bot {
                     );
                 }
 
+                // Replay recent fills to restore positions after a restart.
+                // process_fill deduplicates by fill_id so WS replay is harmless.
+                let fill_count = recent_fills.len();
+                for fill in recent_fills {
+                    ledger.process_fill(fill);
+                }
+                if fill_count > 0 {
+                    let pos_count = ledger.positions.count();
+                    info!(fills = fill_count, positions = pos_count, "Positions restored from recent trade history");
+                }
+
                 let policy = Arc::new(DualPolicy::new().with_maker_offset(config.maker_price_offset));
                 info!(
                     "Execution policy: DualPolicy (Taker=FOK/FAK, Maker=GTC offset={} cents)",
                     config.maker_price_offset
                 );
+
+                // Clone signer before the executor takes ownership.
+                let sync_signer = Some(Arc::clone(&signer));
 
                 let exec = Arc::new(OrderExecutor::new(
                     clob_client,
@@ -167,6 +301,17 @@ impl Bot {
                     Arc::clone(&latency),
                     alerts.clone(),
                 ));
+
+                // Spawn the background sync task on its own connection.
+                let sync_ledger = Arc::clone(&ledger);
+                let sync_registry = Arc::clone(&market_registry);
+                let sync_rpc_url = config.polygon_rpc_url.clone();
+                let sync_redeem_enabled = config.redeem_enabled;
+                tokio::spawn(async move {
+                    crate::sync::SyncTask::new(sync_client, sync_ledger, sync_registry, sync_signer, sync_rpc_url, sync_redeem_enabled)
+                        .run()
+                        .await;
+                });
 
                 (creds, Some(exec))
             } else {

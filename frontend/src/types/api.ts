@@ -79,6 +79,11 @@ export interface MarketInfo {
   status: "tradeable" | "below_min_edge" | "no_arb" | "thin_book" | "no_data";
 }
 
+export interface StrategyInfo {
+  name: string;
+  enabled: boolean;
+}
+
 export interface ControlsInfo {
   trading_paused: boolean;
   max_bet_usd: string;
@@ -104,4 +109,5 @@ export interface WsSnapshot {
   pnl: PnlInfo;
   controls: ControlsInfo;
   markets: MarketInfo[];
+  strategies: StrategyInfo[];
 }

@@ -182,6 +182,30 @@ impl CashBalance {
         }
     }
 
+    /// Sync available cash against the exchange's reported total balance.
+    ///
+    /// The exchange returns the full USDC balance it holds for us (available + reserved
+    /// from its perspective).  We reconstruct what our `available` should be as:
+    ///   `exchange_total - reserved`
+    ///
+    /// If the drift between the computed available and our current available exceeds
+    /// `threshold`, we correct it and return `Some(drift)` (positive = we were
+    /// under-counting, negative = over-counting).  Returns `None` when within tolerance.
+    pub fn sync_from_exchange(&self, exchange_total: Decimal, threshold: Decimal) -> Option<Decimal> {
+        let mut available = self.available.write().unwrap();
+        let reserved = self.reserved.read().unwrap();
+
+        let exchange_available = (exchange_total - *reserved).max(Decimal::ZERO);
+        let drift = exchange_available - *available;
+
+        if drift.abs() > threshold {
+            *available = exchange_available;
+            Some(drift)
+        } else {
+            None
+        }
+    }
+
     /// Reset to initial state (for testing)
     pub fn reset(&self, initial: Decimal) {
         let mut available = self.available.write().unwrap();

@@ -573,7 +573,14 @@ fn quantize_size_for_usdc_precision(price: Decimal, size: Decimal) -> Decimal {
     //      P=0.58 → gcd=2  → lot=50/100=0.50
     let g = gcd_u64(price_cents, 100);
     let lot = Decimal::new((100 / g) as i64, 2);
-    (size / lot).floor() * lot
+    let quantized = (size / lot).floor() * lot;
+    // Polymarket requires notional (price × size) ≥ $1.00.
+    // If flooring dropped us below that, add one lot to meet the minimum.
+    if price * quantized < dec!(1.00) {
+        quantized + lot
+    } else {
+        quantized
+    }
 }
 
 fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
@@ -598,7 +605,8 @@ mod tests {
         use rust_decimal_macros::dec;
         // P=0.51: gcd(51,100)=1 → lot=1.00
         assert_eq!(quantize_size_for_usdc_precision(dec!(0.51), dec!(5.55)), dec!(5));
-        assert_eq!(quantize_size_for_usdc_precision(dec!(0.51), dec!(1.99)), dec!(1));
+        // 0.51 × 1 = $0.51 < $1 minimum → bumps to 2 (next lot)
+        assert_eq!(quantize_size_for_usdc_precision(dec!(0.51), dec!(1.99)), dec!(2));
         // P=0.50: gcd(50,100)=50 → lot=0.02
         assert_eq!(quantize_size_for_usdc_precision(dec!(0.50), dec!(5.55)), dec!(5.54));
         // P=0.58: gcd(58,100)=2 → lot=0.50
@@ -613,6 +621,10 @@ mod tests {
             let usdc = price * s;
             assert_eq!((usdc * dec!(100)).fract(), Decimal::ZERO, "USDC not 2dp for price={price}, size={size}");
         }
+        // Minimum notional: P=0.90, size=1.12 → lot=0.10, floor→1.10, notional=0.99 < $1 → bump to 1.20
+        let s = quantize_size_for_usdc_precision(dec!(0.90), dec!(1.12));
+        assert_eq!(s, dec!(1.20), "should bump to 1.20 to meet $1 minimum");
+        assert!(dec!(0.90) * s >= dec!(1.00), "notional must be ≥ $1");
     }
 
     #[test]

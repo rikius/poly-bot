@@ -88,6 +88,7 @@ impl Bot {
         Arc<ControlState>,
         Option<Arc<OrderExecutor>>,
         Arc<MarketPairRegistry>,
+        Arc<StrategyRouter>,
     ) {
         (
             Arc::clone(&self.ledger),
@@ -97,6 +98,7 @@ impl Bot {
             Arc::clone(&self.controls),
             self.executor.clone(),
             Arc::clone(&self.market_registry),
+            Arc::clone(&self.strategy_router),
         )
     }
 

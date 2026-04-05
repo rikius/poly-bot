@@ -393,7 +393,44 @@ impl GammaClient {
     pub async fn discover_crypto_15min_markets(&self) -> Result<Vec<GammaEvent>> {
         self.discover_crypto_markets(Self::CRYPTO_ASSETS, "15m", 900).await
     }
-    
+
+    /// Look up a market's condition_id by CLOB token ID.
+    ///
+    /// Used as a fallback when the startup-time cache doesn't contain the token
+    /// (e.g., the market had already expired before the bot started).
+    pub async fn condition_id_for_token(&self, token_id: &str) -> Result<Option<String>> {
+        let url = format!("{}/markets?clob_token_id={}", self.base_url, token_id);
+        debug!(token_id = %token_id, "Gamma API: looking up condition_id for token");
+
+        let response = self.client
+            .get(&url)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| BotError::Http(e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            warn!(status = %status, body = %body, "Gamma API error looking up token");
+            return Ok(None);
+        }
+
+        let body = response.text().await.map_err(|e| BotError::Http(e))?;
+
+        // Response is a JSON array of market objects
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct MinimalMarket {
+            condition_id: String,
+        }
+
+        let markets: Vec<MinimalMarket> = serde_json::from_str(&body)
+            .map_err(|e| BotError::Json(format!("Failed to parse markets response: {}", e)))?;
+
+        Ok(markets.into_iter().next().map(|m| m.condition_id))
+    }
+
     /// Internal fetch helper
     async fn fetch_events(&self, url: &str) -> Result<Vec<GammaEvent>> {
         debug!(url = %url, "Fetching from Gamma API");

@@ -17,10 +17,14 @@
 //! - `MathArbStrategy`: Mathematical arbitrage (YES + NO < $1)
 
 pub mod arbitrage;
+pub mod contrarian;
 pub mod edge_calculator;
+pub mod late_entry;
 pub mod maker_rebate_arb;
 pub mod market_pair;
 pub mod router;
+pub mod tbo_trend;
+pub mod tbt_divergence;
 pub mod temporal_arb;
 pub mod traits;
 
@@ -30,6 +34,10 @@ pub use traits::{OrderIntent, Strategy, StrategyContext, StrategyError, Strategy
 
 // Re-export strategy implementations
 pub use arbitrage::{MathArbConfig, MathArbStrategy};
+pub use contrarian::{ContrarianConfig, ContrarianStrategy};
+pub use late_entry::{LateEntryConfig, LateEntryStrategy};
+pub use tbo_trend::{TboConfig, TboTrendStrategy};
+pub use tbt_divergence::{TbtConfig, TbtDivergenceStrategy};
 pub use edge_calculator::{EdgeCalculation, EdgeCalculator, EdgeConfig};
 pub use maker_rebate_arb::{MakerRebateArbStrategy, MakerRebateConfig};
 pub use market_pair::{MarketPair, MarketPairRegistry};

@@ -13,7 +13,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Path, State,
     },
     http::{header, StatusCode},
     response::IntoResponse,
@@ -34,7 +34,7 @@ use crate::execution::OrderExecutor;
 use crate::ledger::{orders::OrderState, positions::Fill, Ledger};
 use crate::metrics::{BotLatency, PrometheusHandle};
 use crate::state::OrderBookState;
-use crate::strategy::MarketPairRegistry;
+use crate::strategy::{MarketPairRegistry, StrategyRouter};
 use crate::websocket::types::Side;
 
 use super::types::*;
@@ -54,6 +54,8 @@ pub struct ApiState {
     pub executor: Option<Arc<OrderExecutor>>,
     /// Market pair registry for edge diagnostics in the snapshot.
     pub market_registry: Arc<MarketPairRegistry>,
+    /// Strategy router — used to enable/disable strategies at runtime.
+    pub strategy_router: Arc<StrategyRouter>,
 }
 
 impl ApiState {
@@ -66,6 +68,7 @@ impl ApiState {
         controls: Arc<ControlState>,
         executor: Option<Arc<OrderExecutor>>,
         market_registry: Arc<MarketPairRegistry>,
+        strategy_router: Arc<StrategyRouter>,
     ) -> Self {
         Self {
             ledger,
@@ -77,6 +80,7 @@ impl ApiState {
             controls,
             executor,
             market_registry,
+            strategy_router,
         }
     }
 
@@ -272,6 +276,17 @@ impl ApiState {
         // Markets — per-pair book state + edge diagnostics
         let markets = self.build_markets();
 
+        // Strategies — name + enabled flag
+        let strategies: Vec<StrategyInfo> = self
+            .strategy_router
+            .strategy_names()
+            .into_iter()
+            .map(|name| {
+                let enabled = self.strategy_router.is_enabled(&name);
+                StrategyInfo { name, enabled }
+            })
+            .collect();
+
         WsSnapshot {
             msg_type: "snapshot".to_string(),
             timestamp: Utc::now().to_rfc3339(),
@@ -285,6 +300,7 @@ impl ApiState {
             latency,
             controls,
             markets,
+            strategies,
         }
     }
 
@@ -473,6 +489,42 @@ async fn config_patch_handler(
     }))
 }
 
+/// POST /api/strategies/:name/enable — enable a strategy by name
+async fn strategy_enable_handler(
+    Path(name): Path<String>,
+    State(state): State<Arc<ApiState>>,
+) -> impl IntoResponse {
+    match state.strategy_router.enable(&name) {
+        Ok(()) => {
+            info!(strategy = %name, "Strategy enabled via API");
+            Json(json!({ "ok": true, "name": name, "enabled": true })).into_response()
+        }
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/strategies/:name/disable — disable a strategy by name
+async fn strategy_disable_handler(
+    Path(name): Path<String>,
+    State(state): State<Arc<ApiState>>,
+) -> impl IntoResponse {
+    match state.strategy_router.disable(&name) {
+        Ok(()) => {
+            warn!(strategy = %name, "Strategy disabled via API");
+            Json(json!({ "ok": true, "name": name, "enabled": false })).into_response()
+        }
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 /// GET /ws — WebSocket upgrade
 async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -545,6 +597,8 @@ pub async fn run_api_server(state: Arc<ApiState>, port: u16) -> anyhow::Result<(
         .route("/api/bot/resume", post(resume_handler))
         .route("/api/orders/cancel-all", post(cancel_all_handler))
         .route("/api/config", patch(config_patch_handler))
+        .route("/api/strategies/:name/enable", post(strategy_enable_handler))
+        .route("/api/strategies/:name/disable", post(strategy_disable_handler))
         .route("/metrics", get(metrics_handler))
         .route("/ws", get(ws_handler))
         .with_state(state)

@@ -135,6 +135,13 @@ pub struct MarketInfo {
     pub status: String,
 }
 
+/// Per-strategy status (name + enabled flag).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyInfo {
+    pub name: String,
+    pub enabled: bool,
+}
+
 /// Runtime-configurable controls broadcast in every snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlsInfo {
@@ -167,4 +174,5 @@ pub struct WsSnapshot {
     pub latency: LatencyInfo,
     pub controls: ControlsInfo,
     pub markets: Vec<MarketInfo>,
+    pub strategies: Vec<StrategyInfo>,
 }

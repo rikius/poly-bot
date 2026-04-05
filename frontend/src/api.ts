@@ -24,4 +24,6 @@ export const api = {
   resumeBot: () => post("/api/bot/resume"),
   cancelAllOrders: () => post("/api/orders/cancel-all"),
   patchConfig: (fields: Record<string, unknown>) => patchJson("/api/config", fields),
+  enableStrategy: (name: string) => post(`/api/strategies/${encodeURIComponent(name)}/enable`),
+  disableStrategy: (name: string) => post(`/api/strategies/${encodeURIComponent(name)}/disable`),
 };

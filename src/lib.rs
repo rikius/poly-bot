@@ -13,6 +13,7 @@
 
 pub mod alerts;
 pub mod api;
+pub mod claim;
 pub mod config;
 pub mod constants;
 pub mod error;
@@ -26,6 +27,7 @@ pub mod orchestrator;
 pub mod risk;
 pub mod state;
 pub mod strategy;
+pub mod sync;
 pub mod websocket;
 
 pub use orchestrator::Bot;

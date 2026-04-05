@@ -11,13 +11,20 @@ function shortToken(id: string): string {
 
 export function FillHistory({ fills }: Props) {
   return (
-    <section className="card">
-      <h2 className="card-title">
-        Recent Fills
+    <section className="card card--fills">
+      <div className="card-header">
+        <h2 className="card-title">
+          <span className="card-title-icon">⟳</span>
+          Recent Fills
+        </h2>
         <span className="badge">{fills.length}</span>
-      </h2>
+      </div>
+
       {fills.length === 0 ? (
-        <p className="empty-state">No fills yet</p>
+        <div className="empty-state">
+          <span className="empty-state__icon">◌</span>
+          No fills yet
+        </div>
       ) : (
         <div className="table-wrapper">
           <table className="data-table">
@@ -28,31 +35,33 @@ export function FillHistory({ fills }: Props) {
                 <th>Side</th>
                 <th>Price</th>
                 <th>Size</th>
-                <th>Notional</th>
+                <th>Total</th>
                 <th>Fee</th>
                 <th>Order ID</th>
               </tr>
             </thead>
             <tbody>
               {fills.map((f) => (
-                <tr key={f.fill_id}>
-                  <td className="mono dim">
+                <tr key={f.fill_id} className={`fill-row--${f.side.toLowerCase()}`}>
+                  <td className="dim">
                     {new Date(f.timestamp).toLocaleTimeString()}
                   </td>
-                  <td className="mono token-cell" title={f.token_id}>
+                  <td className="token-cell" title={f.token_id}>
                     {shortToken(f.token_id)}
                   </td>
                   <td>
-                    <span className={`side-badge side-badge--${f.side}`}>
+                    <span className={`side-badge side-badge--${f.side.toLowerCase()}`}>
                       {f.side.toUpperCase()}
                     </span>
                   </td>
-                  <td className="mono">${parseFloat(f.price).toFixed(4)}</td>
-                  <td className="mono">{parseFloat(f.size).toFixed(4)}</td>
-                  <td className="mono">${parseFloat(f.notional).toFixed(4)}</td>
-                  <td className="mono dim">${parseFloat(f.fee).toFixed(6)}</td>
-                  <td className="mono dim" title={f.order_id}>
-                    {f.order_id.slice(0, 12)}…
+                  <td>${parseFloat(f.price).toFixed(4)}</td>
+                  <td>{parseFloat(f.size).toFixed(4)}</td>
+                  <td style={{ fontWeight: 600 }}>
+                    ${parseFloat(f.notional).toFixed(4)}
+                  </td>
+                  <td className="dim">${parseFloat(f.fee).toFixed(6)}</td>
+                  <td className="dim" title={f.order_id}>
+                    {f.order_id.slice(0, 10)}…
                   </td>
                 </tr>
               ))}

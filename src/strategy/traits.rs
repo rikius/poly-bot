@@ -80,6 +80,10 @@ pub struct OrderIntent {
     /// offset is applied. Zero means "no rounding" (policy passes price as-is).
     pub tick_size: Decimal,
 
+    /// Human-readable market description (question text), populated by the
+    /// orchestrator from the registry before execution logging.
+    pub market_desc: String,
+
     /// Created timestamp
     pub created_at: Instant,
 }
@@ -108,6 +112,7 @@ impl OrderIntent {
             group_id: None,
             priority: 50, // Default middle priority
             tick_size: Decimal::ZERO,
+            market_desc: String::new(),
             created_at: Instant::now(),
         }
     }
@@ -212,6 +217,28 @@ impl<'a> StrategyContext<'a> {
     /// Count of open orders
     pub fn open_orders_count(&self) -> u32 {
         self.ledger.open_orders_count()
+    }
+
+    /// Return both tokens of a binary market pair ordered by ascending ask price.
+    ///
+    /// The token with the **lowest ask** (closest to 0 ¢ — the one the market
+    /// thinks is *losing*) comes first.  Strategies that want to buy the
+    /// "winning" side should iterate this list: the one currently near certainty
+    /// (low ask) is the entry candidate regardless of whether it is YES or NO.
+    ///
+    /// If one or both asks are unavailable the ordering falls back to
+    /// `[yes_token, no_token]`.
+    pub fn tokens_by_ask_asc<'b>(
+        &self,
+        pair: &'b crate::strategy::market_pair::MarketPair,
+    ) -> [&'b crate::websocket::types::TokenId; 2] {
+        let yes_ask = self.best_ask(&pair.yes_token_id).unwrap_or(Decimal::ONE);
+        let no_ask = self.best_ask(&pair.no_token_id).unwrap_or(Decimal::ONE);
+        if no_ask <= yes_ask {
+            [&pair.no_token_id, &pair.yes_token_id]
+        } else {
+            [&pair.yes_token_id, &pair.no_token_id]
+        }
     }
 }
 

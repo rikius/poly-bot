@@ -16,7 +16,9 @@
       "Bash(cargo doc:*)",
       "Bash(find /c/Users/Ramunas -type f -name *.rs)",
       "WebSearch",
-      "WebFetch(domain:docs.polymarket.com)"
+      "WebFetch(domain:docs.polymarket.com)",
+      "Bash(ls c:/Users/Ramunas/projects/poly-bot/Dockerfile* c:/Users/Ramunas/projects/poly-bot/docker-compose*)",
+      "Bash(docker run:*)"
     ]
   }
 }

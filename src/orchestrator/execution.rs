@@ -18,6 +18,18 @@ impl Bot {
     pub(crate) fn process_intents(&mut self, intents: Vec<OrderIntent>) {
         self.total_intents += intents.len() as u64;
 
+        // Enrich intents with market description from registry before logging/execution.
+        let intents: Vec<OrderIntent> = intents.into_iter().map(|mut intent| {
+            if intent.market_desc.is_empty() {
+                intent.market_desc = self.market_registry
+                    .get_by_token(&intent.token_id)
+                    .map(|p| p.description.clone())
+                    .filter(|d| !d.is_empty())
+                    .unwrap_or_else(|| intent.market_id[..intent.market_id.len().min(12)].to_string());
+            }
+            intent
+        }).collect();
+
         for intent in &intents {
             let exec_mode = match intent.urgency {
                 Urgency::Immediate => "TAKER/FOK",
@@ -25,13 +37,14 @@ impl Bot {
                 Urgency::Passive => "MAKER/GTC",
             };
             info!(
-                "📝 Intent: {} {} {} @ ${:.4} x {} [{}] → {}",
+                "📝 Intent: {} {} {} @ ${:.4} x {} [{}] | {} → {}",
                 intent.strategy_name,
                 format!("{:?}", intent.side),
                 &intent.token_id[..intent.token_id.len().min(12)],
                 intent.price,
                 intent.size,
                 intent.reason,
+                intent.market_desc,
                 exec_mode
             );
         }
@@ -183,18 +196,21 @@ impl Bot {
         match result.status {
             ExecutionStatus::FullyFilled => {
                 info!(
-                    "✅ FILLED: {} {} @ {} x {} (order: {})",
+                    "✅ FILLED [{}]: {} {} @ {} x {} | {} (order: {})",
+                    intent.strategy_name,
                     format!("{:?}", intent.side),
                     &intent.token_id[..intent.token_id.len().min(16)],
                     intent.price,
                     result.filled_size,
+                    intent.market_desc,
                     result.order_id.as_deref().unwrap_or("?")
                 );
                 circuit_breaker.record_order_result(None);
             }
             ExecutionStatus::PartialFill => {
                 warn!(
-                    "⚠️ PARTIAL: {} {} @ {} - filled {}/{} (order: {})",
+                    "⚠️ PARTIAL [{}]: {} {} @ {} - filled {}/{} (order: {})",
+                    intent.strategy_name,
                     format!("{:?}", intent.side),
                     &intent.token_id[..intent.token_id.len().min(16)],
                     intent.price,
@@ -233,10 +249,12 @@ impl Bot {
             }
             ExecutionStatus::SubmissionFailed => {
                 error!(
-                    "💥 FAILED: {} {} @ {} - {}",
+                    "💥 FAILED [{}]: {} {} @ {} | {} - {}",
+                    intent.strategy_name,
                     format!("{:?}", intent.side),
                     &intent.token_id[..intent.token_id.len().min(16)],
                     intent.price,
+                    intent.market_desc,
                     result.error.as_deref().unwrap_or("submission failed")
                 );
                 circuit_breaker.record_order_result(Some(crate::error::ErrorType::Retryable));

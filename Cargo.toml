@@ -7,7 +7,7 @@ authors = [""]
 
 [dependencies]
 # Polymarket official SDK
-polymarket-client-sdk = { version = "0.4", features = ["clob", "ws", "gamma", "data", "tracing"] }
+polymarket-client-sdk = { version = "0.4", features = ["clob", "ws", "gamma", "data", "tracing", "ctf"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full", "rt-multi-thread", "fs", "signal"] }

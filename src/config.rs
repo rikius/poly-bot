@@ -16,6 +16,15 @@ pub struct Config {
     pub private_key: Option<String>,
     pub wallet_address: Option<String>,
 
+    /// Polygon JSON-RPC endpoint for on-chain redemptions.
+    /// Defaults to the public polygon-rpc.com if not set.
+    pub polygon_rpc_url: String,
+
+    /// Whether to attempt on-chain `redeemPositions()` for resolved markets.
+    /// Set false to disable redemption (e.g. when the RPC endpoint is unavailable).
+    /// Default: true.
+    pub redeem_enabled: bool,
+
     // Operating mode
     pub mode: OperatingMode,
     pub log_level: String,
@@ -35,6 +44,10 @@ pub struct Config {
     pub max_daily_loss_usd: Decimal,
     pub max_open_orders: u32,
 
+    // Core arb strategy toggles
+    /// Enable MathArbStrategy (YES + NO combined ask < $1 arbitrage). Default: true.
+    pub math_arb_enabled: bool,
+
     // Maker strategy configuration
     /// Use maker execution (GTC orders, zero fees)
     pub use_maker_mode: bool,
@@ -52,6 +65,94 @@ pub struct Config {
     pub temporal_arb_threshold_bps: i64,
     /// Sensitivity parameter: bps_move / sensitivity → probability shift (default 2000)
     pub temporal_arb_sensitivity_bps: i64,
+
+    // Contrarian (mean-reversion) strategy configuration
+    /// Enable ContrarianStrategy (fade sharp price drops expecting mean reversion)
+    pub contrarian_enabled: bool,
+    /// Min mid-price drop in bps within the lookback window to trigger entry (default 500)
+    pub contrarian_min_move_bps: i64,
+    /// Lookback window for velocity measurement in seconds (default 60)
+    pub contrarian_lookback_secs: u64,
+    /// Max notional per contrarian trade in USDC (default: inherits max_bet_usd)
+    pub contrarian_max_bet_usd: Decimal,
+    /// Time-based exit: close after this many seconds (default 120)
+    pub contrarian_max_hold_secs: u64,
+    /// Take-profit threshold as fraction of entry price (default 0.08 = 8 %)
+    pub contrarian_profit_target_pct: Decimal,
+    /// Stop-loss threshold as fraction of entry price (default 0.05 = 5 %)
+    pub contrarian_stop_loss_pct: Decimal,
+    /// Minimum edge for standard markets (default 0.05)
+    pub contrarian_min_edge: Decimal,
+    /// Minimum edge for 10 %-fee markets (default 0.12)
+    pub contrarian_high_fee_min_edge: Decimal,
+    /// Per-market cooldown after a trade fires in ms (default 10 000)
+    pub contrarian_cooldown_ms: u64,
+
+    // TBO Trend (Trending Breakout) strategy configuration
+    /// Enable TboTrendStrategy (breakout momentum)
+    pub tbo_enabled: bool,
+    /// Rolling lookback window in book-update ticks (default 50)
+    pub tbo_lookback_ticks: usize,
+    /// Bps above rolling high required to qualify as a breakout (default 150)
+    pub tbo_breakout_threshold_bps: i64,
+    /// Consecutive ticks above breakout level before entry (default 3)
+    pub tbo_min_confirm_ticks: u32,
+    /// Max notional per trade in USDC (default: inherits max_bet_usd)
+    pub tbo_max_bet_usd: Decimal,
+    /// Time-based exit in seconds (default 180)
+    pub tbo_max_hold_secs: u64,
+    /// Take-profit threshold (default 0.06)
+    pub tbo_profit_target_pct: Decimal,
+    /// Stop-loss threshold (default 0.04)
+    pub tbo_stop_loss_pct: Decimal,
+    /// Minimum ask-side depth in shares (default 10)
+    pub tbo_min_ask_depth: Decimal,
+    /// Per-market cooldown in ms (default 15 000)
+    pub tbo_cooldown_ms: u64,
+
+    // TBT Divergence + Late Entry strategy configuration
+    /// Enable TbtDivergenceStrategy (RSI divergence + late entry)
+    pub tbt_enabled: bool,
+    /// Rolling lookback window in book-update ticks (default 80)
+    pub tbt_lookback_ticks: usize,
+    /// RSI computation period in price changes (default 14)
+    pub tbt_rsi_period: usize,
+    /// Minimum price gap between old/recent lows in bps (default 100)
+    pub tbt_divergence_min_gap_bps: i64,
+    /// Pullback required from detection mid before late entry in bps (default 50)
+    pub tbt_pullback_bps: i64,
+    /// Ticks to wait for pullback before discarding signal (default 30)
+    pub tbt_signal_expiry_ticks: u32,
+    /// Max notional per trade in USDC (default: inherits max_bet_usd)
+    pub tbt_max_bet_usd: Decimal,
+    /// Time-based exit in seconds (default 240)
+    pub tbt_max_hold_secs: u64,
+    /// Take-profit threshold (default 0.07)
+    pub tbt_profit_target_pct: Decimal,
+    /// Stop-loss threshold (default 0.05)
+    pub tbt_stop_loss_pct: Decimal,
+    /// Minimum ask-side depth in shares (default 8)
+    pub tbt_min_ask_depth: Decimal,
+    /// Per-market cooldown in ms (default 20 000)
+    pub tbt_cooldown_ms: u64,
+
+    // Late Entry (High-Confidence Near-Resolution) strategy configuration
+    /// Enable LateEntryStrategy (buy near-certain outcomes close to resolution)
+    pub late_entry_enabled: bool,
+    /// Enter when this fraction of the round remains (e.g. 0.20 = last 20%).
+    /// Scales automatically: 15-min × 0.20 = last 3 min; 5-min × 0.20 = last 1 min.
+    /// Default: 0.20.
+    pub late_entry_window_pct: f64,
+    /// Minimum ask price to buy — token must cost ≥ this (default 0.90 = near-certain winner)
+    pub late_entry_min_entry_price: Decimal,
+    /// Max notional per trade in USDC (default: inherits max_bet_usd)
+    pub late_entry_max_bet_usd: Decimal,
+    /// Minimum ask-side depth in shares (default 5)
+    pub late_entry_min_ask_depth: Decimal,
+    /// Per-market cooldown in ms — prevents re-entering same round (default 120 000)
+    pub late_entry_cooldown_ms: u64,
+    /// Stop-loss price: sell if best bid drops to or below this (default 0.70, set 0 to disable)
+    pub late_entry_stop_loss_price: Decimal,
 
     // Market discovery configuration
     /// Asset filter: only trade these assets, e.g. ["btc"], ["btc", "eth"].
@@ -116,6 +217,13 @@ impl Config {
         let wallet_address = std::env::var("WALLET_ADDRESS")
             .or_else(|_| std::env::var("builder_address"))
             .ok();
+        let polygon_rpc_url = std::env::var("POLYGON_RPC_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| crate::claim::POLYGON_RPC_DEFAULT.to_string());
+        let redeem_enabled = std::env::var("REDEEM_ENABLED")
+            .map(|v| v.trim().to_lowercase() != "false")
+            .unwrap_or(true);
 
         // Live mode requires all credentials
         if mode == OperatingMode::Live {
@@ -153,6 +261,10 @@ impl Config {
             .unwrap_or(10);
 
         // Maker strategy configuration
+        let math_arb_enabled = std::env::var("MATH_ARB_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(true); // default ON — preserves existing behaviour
+
         let use_maker_mode = std::env::var("USE_MAKER_MODE")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
@@ -176,6 +288,130 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(2000i64);
+
+        // Contrarian strategy configuration
+        let contrarian_enabled = std::env::var("CONTRARIAN_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        let contrarian_min_move_bps = std::env::var("CONTRARIAN_MIN_MOVE_BPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(500i64);
+        let contrarian_lookback_secs = std::env::var("CONTRARIAN_LOOKBACK_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60u64);
+        let contrarian_max_bet_usd = std::env::var("CONTRARIAN_MAX_BET_USD")
+            .ok()
+            .and_then(|v| Decimal::from_str(&v).ok())
+            .unwrap_or(max_bet_usd);
+        let contrarian_max_hold_secs = std::env::var("CONTRARIAN_MAX_HOLD_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(120u64);
+        let contrarian_profit_target_pct = env_decimal("CONTRARIAN_PROFIT_TARGET_PCT", Decimal::new(8, 2));
+        let contrarian_stop_loss_pct = env_decimal("CONTRARIAN_STOP_LOSS_PCT", Decimal::new(5, 2));
+        let contrarian_min_edge = env_decimal("CONTRARIAN_MIN_EDGE", Decimal::new(5, 2));
+        let contrarian_high_fee_min_edge = env_decimal("CONTRARIAN_HIGH_FEE_MIN_EDGE", Decimal::new(12, 2));
+        let contrarian_cooldown_ms = std::env::var("CONTRARIAN_COOLDOWN_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10_000u64);
+
+        // TBO Trend strategy configuration
+        let tbo_enabled = std::env::var("TBO_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        let tbo_lookback_ticks = std::env::var("TBO_LOOKBACK_TICKS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50usize);
+        let tbo_breakout_threshold_bps = std::env::var("TBO_BREAKOUT_THRESHOLD_BPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(150i64);
+        let tbo_min_confirm_ticks = std::env::var("TBO_MIN_CONFIRM_TICKS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3u32);
+        let tbo_max_bet_usd = std::env::var("TBO_MAX_BET_USD")
+            .ok()
+            .and_then(|v| Decimal::from_str(&v).ok())
+            .unwrap_or(max_bet_usd);
+        let tbo_max_hold_secs = std::env::var("TBO_MAX_HOLD_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(180u64);
+        let tbo_profit_target_pct = env_decimal("TBO_PROFIT_TARGET_PCT", Decimal::new(6, 2));
+        let tbo_stop_loss_pct = env_decimal("TBO_STOP_LOSS_PCT", Decimal::new(4, 2));
+        let tbo_min_ask_depth = env_decimal("TBO_MIN_ASK_DEPTH", Decimal::new(10, 0));
+        let tbo_cooldown_ms = std::env::var("TBO_COOLDOWN_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(15_000u64);
+
+        // TBT Divergence strategy configuration
+        let tbt_enabled = std::env::var("TBT_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        let tbt_lookback_ticks = std::env::var("TBT_LOOKBACK_TICKS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(80usize);
+        let tbt_rsi_period = std::env::var("TBT_RSI_PERIOD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(14usize);
+        let tbt_divergence_min_gap_bps = std::env::var("TBT_DIVERGENCE_MIN_GAP_BPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100i64);
+        let tbt_pullback_bps = std::env::var("TBT_PULLBACK_BPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50i64);
+        let tbt_signal_expiry_ticks = std::env::var("TBT_SIGNAL_EXPIRY_TICKS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30u32);
+        let tbt_max_bet_usd = std::env::var("TBT_MAX_BET_USD")
+            .ok()
+            .and_then(|v| Decimal::from_str(&v).ok())
+            .unwrap_or(max_bet_usd);
+        let tbt_max_hold_secs = std::env::var("TBT_MAX_HOLD_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(240u64);
+        let tbt_profit_target_pct = env_decimal("TBT_PROFIT_TARGET_PCT", Decimal::new(7, 2));
+        let tbt_stop_loss_pct = env_decimal("TBT_STOP_LOSS_PCT", Decimal::new(5, 2));
+        let tbt_min_ask_depth = env_decimal("TBT_MIN_ASK_DEPTH", Decimal::new(8, 0));
+        let tbt_cooldown_ms = std::env::var("TBT_COOLDOWN_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20_000u64);
+
+        // Late Entry strategy configuration
+        let late_entry_enabled = std::env::var("LATE_ENTRY_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        let late_entry_window_pct = std::env::var("LATE_ENTRY_WINDOW_PCT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.20);
+        let late_entry_min_entry_price =
+            env_decimal("LATE_ENTRY_MIN_ENTRY_PRICE", Decimal::new(90, 2));
+        let late_entry_max_bet_usd = std::env::var("LATE_ENTRY_MAX_BET_USD")
+            .ok()
+            .and_then(|v| Decimal::from_str(&v).ok())
+            .unwrap_or(max_bet_usd);
+        let late_entry_min_ask_depth =
+            env_decimal("LATE_ENTRY_MIN_ASK_DEPTH", Decimal::new(5, 0));
+        let late_entry_stop_loss_price =
+            env_decimal("LATE_ENTRY_STOP_LOSS_PRICE", Decimal::new(70, 2));
+        let late_entry_cooldown_ms = std::env::var("LATE_ENTRY_COOLDOWN_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(120_000u64);
 
         // Market discovery
         // MARKET_ASSETS=BTC,ETH  → ["btc", "eth"]  (empty = all supported assets)
@@ -211,6 +447,8 @@ impl Config {
             passphrase: passphrase.map(|s| s.trim_matches('"').to_string()),
             private_key: private_key.map(|s| s.trim_matches('"').to_string()),
             wallet_address,
+            polygon_rpc_url,
+            redeem_enabled,
             mode,
             log_level,
             initial_cash_usd,
@@ -219,6 +457,7 @@ impl Config {
             max_total_exposure_usd,
             max_daily_loss_usd,
             max_open_orders,
+            math_arb_enabled,
             use_maker_mode,
             maker_price_offset,
             maker_order_ttl_secs,
@@ -226,6 +465,45 @@ impl Config {
             temporal_arb_enabled,
             temporal_arb_threshold_bps,
             temporal_arb_sensitivity_bps,
+            contrarian_enabled,
+            contrarian_min_move_bps,
+            contrarian_lookback_secs,
+            contrarian_max_bet_usd,
+            contrarian_max_hold_secs,
+            contrarian_profit_target_pct,
+            contrarian_stop_loss_pct,
+            contrarian_min_edge,
+            contrarian_high_fee_min_edge,
+            contrarian_cooldown_ms,
+            tbo_enabled,
+            tbo_lookback_ticks,
+            tbo_breakout_threshold_bps,
+            tbo_min_confirm_ticks,
+            tbo_max_bet_usd,
+            tbo_max_hold_secs,
+            tbo_profit_target_pct,
+            tbo_stop_loss_pct,
+            tbo_min_ask_depth,
+            tbo_cooldown_ms,
+            tbt_enabled,
+            tbt_lookback_ticks,
+            tbt_rsi_period,
+            tbt_divergence_min_gap_bps,
+            tbt_pullback_bps,
+            tbt_signal_expiry_ticks,
+            tbt_max_bet_usd,
+            tbt_max_hold_secs,
+            tbt_profit_target_pct,
+            tbt_stop_loss_pct,
+            tbt_min_ask_depth,
+            tbt_cooldown_ms,
+            late_entry_enabled,
+            late_entry_window_pct,
+            late_entry_min_entry_price,
+            late_entry_max_bet_usd,
+            late_entry_min_ask_depth,
+            late_entry_stop_loss_price,
+            late_entry_cooldown_ms,
             market_assets,
             market_timeframe,
             market_interval_secs,

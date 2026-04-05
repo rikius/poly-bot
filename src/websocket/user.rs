@@ -68,10 +68,20 @@ pub struct TradeNotification {
 impl TradeNotification {
     /// Convert to Fill struct for ledger
     pub fn to_fill(&self) -> Result<Fill> {
-        let side = match self.side.to_uppercase().as_str() {
+        // trade.side is the TAKER's side (the aggressor who crossed the spread).
+        // When this wallet was the MAKER, the correct side is the opposite.
+        let taker_side = match self.side.to_uppercase().as_str() {
             "BUY" => Side::Buy,
             "SELL" => Side::Sell,
             _ => return Err(BotError::Json(format!("Unknown side: {}", self.side))),
+        };
+        let side = if self.trader_side.to_uppercase() == "MAKER" {
+            match taker_side {
+                Side::Buy => Side::Sell,
+                Side::Sell => Side::Buy,
+            }
+        } else {
+            taker_side
         };
 
         let price = Decimal::from_str(&self.price)
@@ -81,7 +91,8 @@ impl TradeNotification {
             .map_err(|e| BotError::Json(format!("Invalid size: {}", e)))?;
 
         let fee_bps = self.fee_rate_bps.parse::<i64>().unwrap_or(0);
-        let fee = price * size * Decimal::new(fee_bps, 4);
+        let notional = (price * size).round_dp(4);
+        let fee = notional * Decimal::new(fee_bps, 4);
 
         let timestamp = self
             .timestamp

@@ -330,6 +330,20 @@ impl Positions {
         }
     }
 
+    /// Force-close a position by zeroing its shares.
+    ///
+    /// Called by the sync task when the on-chain conditional token balance is 0
+    /// (market resolved or position fully sold externally).  Realized P&L and
+    /// fee totals are preserved for reporting; unrealized P&L is cleared.
+    pub fn force_close(&self, token_id: &TokenId) {
+        if let Some(mut pos) = self.positions.get_mut(token_id) {
+            pos.shares = Decimal::ZERO;
+            pos.avg_cost = Decimal::ZERO;
+            pos.cost_basis = Decimal::ZERO;
+            pos.unrealized_pnl = Decimal::ZERO;
+        }
+    }
+
     /// Clear all positions (for testing/reset)
     pub fn clear(&self) {
         self.positions.clear();

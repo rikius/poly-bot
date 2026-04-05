@@ -30,7 +30,7 @@ export function App() {
         </div>
       ) : (
         <main className="main-content">
-          <Controls controls={snapshot.controls} />
+          <Controls controls={snapshot.controls} strategies={snapshot.strategies ?? []} />
           <Markets markets={snapshot.markets} />
           <Portfolio
             cash={snapshot.cash}

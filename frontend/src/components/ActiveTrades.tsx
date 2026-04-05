@@ -1,12 +1,7 @@
 import type { PositionInfo, OrderInfo } from "../types/api";
 
-interface PositionsProps {
-  positions: PositionInfo[];
-}
-
-interface OrdersProps {
-  orders: OrderInfo[];
-}
+interface PositionsProps { positions: PositionInfo[]; }
+interface OrdersProps    { orders: OrderInfo[]; }
 
 function shortToken(id: string): string {
   if (id.length <= 12) return id;
@@ -27,15 +22,30 @@ function fmt4(val: string): string {
   return `${prefix}${n.toFixed(4)}`;
 }
 
+/** Returns 0–100 clamped fill percentage */
+function pnlBarPct(val: string, notional: string): number {
+  const pnl = parseFloat(val);
+  const cost = parseFloat(notional);
+  if (isNaN(pnl) || isNaN(cost) || cost <= 0) return 0;
+  return Math.min(Math.abs(pnl / cost) * 100, 100);
+}
+
 export function Positions({ positions }: PositionsProps) {
   return (
-    <section className="card">
-      <h2 className="card-title">
-        Open Positions
+    <section className="card card--positions">
+      <div className="card-header">
+        <h2 className="card-title">
+          <span className="card-title-icon">◈</span>
+          Open Positions
+        </h2>
         <span className="badge">{positions.length}</span>
-      </h2>
+      </div>
+
       {positions.length === 0 ? (
-        <p className="empty-state">No open positions</p>
+        <div className="empty-state">
+          <span className="empty-state__icon">◌</span>
+          No open positions
+        </div>
       ) : (
         <div className="table-wrapper">
           <table className="data-table">
@@ -46,36 +56,50 @@ export function Positions({ positions }: PositionsProps) {
                 <th>Shares</th>
                 <th>Avg Cost</th>
                 <th>Notional</th>
-                <th>Realized P&L</th>
-                <th>Unrealized P&L</th>
-                <th>Total P&L</th>
+                <th>Realized P&amp;L</th>
+                <th>Unrealized P&amp;L</th>
+                <th>Total P&amp;L</th>
               </tr>
             </thead>
             <tbody>
-              {positions.map((p) => (
-                <tr key={p.token_id}>
-                  <td className="mono token-cell" title={p.token_id}>
-                    {shortToken(p.token_id)}
-                  </td>
-                  <td>
-                    <span className={`dir-badge dir-badge--${p.direction}`}>
-                      {p.direction.toUpperCase()}
-                    </span>
-                  </td>
-                  <td className="mono">{parseFloat(p.shares).toFixed(4)}</td>
-                  <td className="mono">${parseFloat(p.avg_cost).toFixed(4)}</td>
-                  <td className="mono">${parseFloat(p.notional).toFixed(4)}</td>
-                  <td className={`mono ${pnlColor(p.realized_pnl)}`}>
-                    {fmt4(p.realized_pnl)}
-                  </td>
-                  <td className={`mono ${pnlColor(p.unrealized_pnl)}`}>
-                    {fmt4(p.unrealized_pnl)}
-                  </td>
-                  <td className={`mono ${pnlColor(p.total_pnl)}`}>
-                    {fmt4(p.total_pnl)}
-                  </td>
-                </tr>
-              ))}
+              {positions.map((p) => {
+                const totalPnl = parseFloat(p.total_pnl);
+                const isPos = totalPnl > 0;
+                const pct = pnlBarPct(p.total_pnl, p.notional);
+
+                return (
+                  <tr key={p.token_id}>
+                    <td className="token-cell" title={p.token_id}>
+                      {shortToken(p.token_id)}
+                    </td>
+                    <td>
+                      <span className={`dir-badge dir-badge--${p.direction}`}>
+                        {p.direction.toUpperCase()}
+                      </span>
+                    </td>
+                    <td>{parseFloat(p.shares).toFixed(4)}</td>
+                    <td>${parseFloat(p.avg_cost).toFixed(4)}</td>
+                    <td>${parseFloat(p.notional).toFixed(4)}</td>
+                    <td className={pnlColor(p.realized_pnl)}>
+                      {fmt4(p.realized_pnl)}
+                    </td>
+                    <td className={pnlColor(p.unrealized_pnl)}>
+                      {fmt4(p.unrealized_pnl)}
+                    </td>
+                    <td>
+                      <div className={pnlColor(p.total_pnl)} style={{ fontWeight: 600 }}>
+                        {fmt4(p.total_pnl)}
+                      </div>
+                      <div className="pnl-bar">
+                        <div
+                          className={`pnl-bar__fill ${isPos ? "pnl-bar__fill--pos" : "pnl-bar__fill--neg"}`}
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -85,20 +109,27 @@ export function Positions({ positions }: PositionsProps) {
 }
 
 const STATE_COLORS: Record<string, string> = {
-  acked: "#3b82f6",
-  partial: "#f59e0b",
-  cancel_pending: "#ef4444",
+  acked:          "var(--cyan)",
+  partial:        "var(--yellow)",
+  cancel_pending: "var(--red)",
 };
 
 export function ActiveOrders({ orders }: OrdersProps) {
   return (
-    <section className="card">
-      <h2 className="card-title">
-        Active Orders
+    <section className="card card--orders">
+      <div className="card-header">
+        <h2 className="card-title">
+          <span className="card-title-icon">⟡</span>
+          Active Orders
+        </h2>
         <span className="badge">{orders.length}</span>
-      </h2>
+      </div>
+
       {orders.length === 0 ? (
-        <p className="empty-state">No active orders</p>
+        <div className="empty-state">
+          <span className="empty-state__icon">◌</span>
+          No active orders
+        </div>
       ) : (
         <div className="table-wrapper">
           <table className="data-table">
@@ -118,28 +149,28 @@ export function ActiveOrders({ orders }: OrdersProps) {
             <tbody>
               {orders.map((o) => (
                 <tr key={o.local_id}>
-                  <td className="mono token-cell" title={o.token_id}>
+                  <td className="token-cell" title={o.token_id}>
                     {shortToken(o.token_id)}
                   </td>
                   <td>
-                    <span className={`side-badge side-badge--${o.side}`}>
+                    <span className={`side-badge side-badge--${o.side.toLowerCase()}`}>
                       {o.side.toUpperCase()}
                     </span>
                   </td>
-                  <td className="mono">${parseFloat(o.price).toFixed(4)}</td>
-                  <td className="mono">{parseFloat(o.original_size).toFixed(2)}</td>
-                  <td className="mono">{parseFloat(o.filled_size).toFixed(2)}</td>
-                  <td className="mono">{parseFloat(o.remaining_size).toFixed(2)}</td>
+                  <td>${parseFloat(o.price).toFixed(4)}</td>
+                  <td>{parseFloat(o.original_size).toFixed(2)}</td>
+                  <td>{parseFloat(o.filled_size).toFixed(2)}</td>
+                  <td>{parseFloat(o.remaining_size).toFixed(2)}</td>
                   <td>
                     <span
                       className="state-badge"
-                      style={{ color: STATE_COLORS[o.state] ?? "#9ca3af" }}
+                      style={{ color: STATE_COLORS[o.state] ?? "var(--text-secondary)" }}
                     >
                       {o.state}
                     </span>
                   </td>
-                  <td className="mono dim">{o.strategy_id ?? "—"}</td>
-                  <td className="mono dim">
+                  <td className="dim">{o.strategy_id ?? "—"}</td>
+                  <td className="dim">
                     {new Date(o.created_at).toLocaleTimeString()}
                   </td>
                 </tr>

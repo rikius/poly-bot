@@ -4,7 +4,7 @@ use super::Bot;
 use crate::config::OperatingMode;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use tracing::info;
+use tracing::{debug, info};
 
 impl Bot {
     /// Log heartbeat with current stats (every 10s).
@@ -182,7 +182,7 @@ impl Bot {
                 "TRADEABLE"
             };
 
-            info!(
+            debug!(
                 "EdgeDiag: {} | ask={:.3}+{:.3}={:.3} mid_sum={} \
                  raw_edge={:+.3} fee_cost={:.3} required={:.3} {} → {}",
                 &pair.condition_id[..pair.condition_id.len().min(12)],
@@ -208,12 +208,12 @@ impl Bot {
                     .collect::<Vec<_>>()
                     .join(" ")
             };
-            info!(
+            debug!(
                 "  YES bids=[{}] asks=[{}]",
                 fmt_levels(&yes_bids),
                 fmt_levels(&yes_asks),
             );
-            info!(
+            debug!(
                 "  NO  bids=[{}] asks=[{}]",
                 fmt_levels(&no_bids),
                 fmt_levels(&no_asks),
@@ -223,7 +223,7 @@ impl Bot {
         }
 
         if !any_logged {
-            info!("EdgeDiag: no books received yet for any registered market pair");
+            debug!("EdgeDiag: no books received yet for any registered market pair");
         }
 
         let all_fee_blocked = pairs.iter().all(|p| {
@@ -243,7 +243,7 @@ impl Bot {
         });
 
         if all_fee_blocked && !pairs.is_empty() {
-            info!(
+            debug!(
                 "EdgeDiag: all markets below required edge. \
                  For 15-min crypto markets (fee_rate=1000bps/10%), required edge ≈ 10%+3¢. \
                  Consider enabling TemporalArbStrategy (TEMPORAL_ARB_ENABLED=true) which \

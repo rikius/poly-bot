@@ -55,6 +55,8 @@ impl OrderState {
             (PartiallyFilled, CancelPending) => true,
             (CancelPending, Cancelled) => true,
             (CancelPending, Filled) => true, // Fill came in before cancel processed
+            (Acked, Cancelled) => true,          // server-side cancel without our request
+            (PartiallyFilled, Cancelled) => true, // server-side cancel of a partial
 
             // Error states - can always transition to these
             (_, Unknown) => true,

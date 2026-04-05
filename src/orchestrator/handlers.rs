@@ -60,27 +60,42 @@ impl Bot {
 
         match trade.to_fill() {
             Ok(fill) => {
+                let total = fill.price * fill.size;
+                let direction = if fill.side == crate::websocket::Side::Buy { "cost" } else { "proceeds" };
+                let order_short = &fill.order_id[..fill.order_id.len().min(12)];
+
+                // Look up strategy name from order tracker (may be gone for FAK orders).
+                let strategy_tag = self.order_tracker.get(&fill.order_id)
+                    .map(|o| o.strategy_name.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                // Look up market description from registry using token_id.
+                let market_desc = self.market_registry
+                    .get_by_token(&fill.token_id)
+                    .map(|p| p.description.clone())
+                    .filter(|d| !d.is_empty())
+                    .unwrap_or_else(|| fill.token_id[..fill.token_id.len().min(12)].to_string());
+
                 info!(
-                    "💰 Fill: {} {} {} @ ${} (fee: ${})",
-                    format!("{:?}", fill.side),
+                    "💰 Fill [{}]: {} {:.4} shares @ ${:.4} = ${:.4} {} (fee: ${:.4}) | {} order={}",
+                    strategy_tag,
+                    fill.side,
                     fill.size,
-                    &fill.token_id[..fill.token_id.len().min(12)],
                     fill.price,
-                    fill.fee
+                    total,
+                    direction,
+                    fill.fee,
+                    market_desc,
+                    order_short,
                 );
 
                 self.ledger.process_fill(fill.clone());
 
                 if let Some(remaining) = self.order_tracker.on_fill(&fill.order_id, fill.size) {
-                    if remaining.is_zero() {
-                        info!(
-                            "Order {} fully filled",
-                            &fill.order_id[..fill.order_id.len().min(12)]
-                        );
-                    } else {
+                    if !remaining.is_zero() {
                         debug!(
                             "Order {} partial fill, {} remaining",
-                            &fill.order_id[..fill.order_id.len().min(12)],
+                            order_short,
                             remaining
                         );
                     }
@@ -187,16 +202,28 @@ impl Bot {
         }
     }
 
-    /// Refresh market subscriptions — discovers new 15-min markets and drops expired ones.
+    /// Refresh market subscriptions — discovers new markets and drops expired ones.
     ///
     /// Called every 5 minutes from the main run loop.  When the market set changes the
     /// `MarketWebSocket` task is restarted so the new token IDs are subscribed immediately.
     pub(crate) async fn refresh_markets(&mut self) {
-        info!("Refreshing 15-min market subscriptions...");
+        info!(
+            timeframe = %self.config.market_timeframe,
+            "Refreshing market subscriptions..."
+        );
 
         let discovery = MarketDiscovery::new();
-        let discovered = match discovery.discover_crypto_15min().await {
-            Ok(markets) => markets.into_iter().take(5).collect::<Vec<_>>(),
+        let limit = self.config.market_limit;
+        let discovered = match discovery
+            .discover_from_config(
+                &self.config.market_assets,
+                &self.config.market_timeframe,
+                self.config.market_interval_secs,
+                limit,
+            )
+            .await
+        {
+            Ok(markets) => markets,
             Err(e) => {
                 warn!(error = %e, "Market refresh discovery failed — keeping current subscriptions");
                 return;

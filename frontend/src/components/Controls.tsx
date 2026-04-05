@@ -1,13 +1,15 @@
 import { useState } from "react";
 import { api } from "../api";
-import type { ControlsInfo } from "../types/api";
+import type { ControlsInfo, StrategyInfo } from "../types/api";
 
 interface Props {
   controls: ControlsInfo;
+  strategies: StrategyInfo[];
 }
 
-export function Controls({ controls }: Props) {
+export function Controls({ controls, strategies }: Props) {
   const [busy, setBusy] = useState<string | null>(null);
+  const [strategyBusy, setStrategyBusy] = useState<string | null>(null);
   const [localCfg, setLocalCfg] = useState<ControlsInfo>(controls);
   const [saved, setSaved] = useState(false);
   const [cancelResult, setCancelResult] = useState<string | null>(null);
@@ -67,6 +69,19 @@ export function Controls({ controls }: Props) {
     }
   }
 
+  async function handleStrategyToggle(name: string, currentlyEnabled: boolean) {
+    setStrategyBusy(name);
+    try {
+      if (currentlyEnabled) {
+        await api.disableStrategy(name);
+      } else {
+        await api.enableStrategy(name);
+      }
+    } finally {
+      setStrategyBusy(null);
+    }
+  }
+
   function num(field: keyof ControlsInfo) {
     return (e: React.ChangeEvent<HTMLInputElement>) =>
       setLocalCfg((c) => ({ ...c, [field]: e.target.value }));
@@ -85,140 +100,171 @@ export function Controls({ controls }: Props) {
   const paused = controls.trading_paused;
 
   return (
-    <section className="card controls-card">
-      {/* ── Bot enable/disable ── */}
-      <div className="controls-header">
-        <div className="controls-title-row">
-          <h2 className="section-title">Bot Controls</h2>
-          <span className={`bot-status-badge ${paused ? "paused" : "active"}`}>
-            {paused ? "PAUSED" : "ACTIVE"}
-          </span>
-        </div>
+    <section className="card card--controls">
+      {/* ── Header ── */}
+      <div className="card-header">
+        <h2 className="card-title">
+          <span className="card-title-icon">⌬</span>
+          Bot Controls
+        </h2>
+        <span className={`bot-status-badge ${paused ? "paused" : "active"}`}>
+          {paused ? "PAUSED" : "ACTIVE"}
+        </span>
+      </div>
 
-        <div className="controls-actions">
-          <button
-            className={`btn-toggle ${paused ? "btn-resume" : "btn-pause"}`}
-            onClick={handleToggle}
-            disabled={busy === "toggle"}
-          >
-            {busy === "toggle"
-              ? "…"
-              : paused
-              ? "▶ Resume Bot"
-              : "⏸ Pause Bot"}
-          </button>
+      {/* ── Action bar ── */}
+      <div className="controls-action-bar">
+        <button
+          className={`btn-toggle ${paused ? "btn-resume" : "btn-pause"}`}
+          onClick={handleToggle}
+          disabled={busy === "toggle"}
+        >
+          {busy === "toggle"
+            ? "…"
+            : paused
+            ? "▶ Resume Bot"
+            : "⏸ Pause Bot"}
+        </button>
 
-          <button
-            className="btn-danger"
-            onClick={handleCancelAll}
-            disabled={busy === "cancel"}
-          >
-            {busy === "cancel" ? "Cancelling…" : "✕ Cancel All Orders"}
-          </button>
-        </div>
+        <button
+          className="btn-danger"
+          onClick={handleCancelAll}
+          disabled={busy === "cancel"}
+        >
+          {busy === "cancel" ? "Cancelling…" : "✕ Cancel All Orders"}
+        </button>
 
         {cancelResult && (
-          <p className={`cancel-result ${cancelResult.startsWith("Error") ? "error" : "ok"}`}>
+          <span className={`cancel-result ${cancelResult.startsWith("Error") ? "error" : "ok"}`}>
             {cancelResult}
-          </p>
+          </span>
         )}
       </div>
 
-      {/* ── Strategy config ── */}
+      {/* ── Config sections ── */}
       <div className="controls-body">
-        <h3 className="controls-section-label">Strategy Parameters</h3>
 
-        <div className="config-grid">
-          {/* Sizing */}
-          <div className="config-group">
-            <label className="config-label">Max Bet (USD)</label>
-            <input
-              type="number"
-              className="config-input"
-              min="1"
-              step="1"
-              value={localCfg.max_bet_usd}
-              onChange={num("max_bet_usd")}
-            />
+        {/* Sizing group */}
+        <div className="config-section">
+          <div className="config-section-label">
+            <span className="config-section-dot" style={{ background: "var(--cyan)" }} />
+            Position Sizing
           </div>
-
-          <div className="config-group">
-            <label className="config-label">Max Position / Market (USD)</label>
-            <input
-              type="number"
-              className="config-input"
-              min="1"
-              step="1"
-              value={localCfg.max_position_per_market_usd}
-              onChange={num("max_position_per_market_usd")}
-            />
-          </div>
-
-          <div className="config-group">
-            <label className="config-label">Max Total Exposure (USD)</label>
-            <input
-              type="number"
-              className="config-input"
-              min="1"
-              step="1"
-              value={localCfg.max_total_exposure_usd}
-              onChange={num("max_total_exposure_usd")}
-            />
-          </div>
-
-          {/* Risk */}
-          <div className="config-group">
-            <label className="config-label">Max Daily Loss (USD)</label>
-            <input
-              type="number"
-              className="config-input"
-              min="1"
-              step="1"
-              value={localCfg.max_daily_loss_usd}
-              onChange={num("max_daily_loss_usd")}
-            />
-          </div>
-
-          <div className="config-group">
-            <label className="config-label">Max Open Orders</label>
-            <input
-              type="number"
-              className="config-input"
-              min="1"
-              step="1"
-              value={localCfg.max_open_orders}
-              onChange={numInt("max_open_orders")}
-            />
-          </div>
-
-          {/* Execution */}
-          <div className="config-group config-group--check">
-            <label className="config-label">
+          <div className="config-grid">
+            <div className="config-group">
+              <label className="config-label">Max Bet (USD)</label>
               <input
-                type="checkbox"
-                checked={localCfg.use_maker_mode}
-                onChange={bool("use_maker_mode")}
+                type="number"
+                className="config-input"
+                min="1"
+                step="1"
+                value={localCfg.max_bet_usd}
+                onChange={num("max_bet_usd")}
               />
-              <span>Maker Mode (GTC, 0% fees)</span>
-            </label>
-          </div>
+            </div>
 
-          {/* Temporal arb */}
-          <div className="config-group config-group--check">
-            <label className="config-label">
+            <div className="config-group">
+              <label className="config-label">Max Position / Market</label>
               <input
-                type="checkbox"
-                checked={localCfg.temporal_arb_enabled}
-                onChange={bool("temporal_arb_enabled")}
+                type="number"
+                className="config-input"
+                min="1"
+                step="1"
+                value={localCfg.max_position_per_market_usd}
+                onChange={num("max_position_per_market_usd")}
               />
-              <span>Temporal Arb (Binance feed)</span>
-            </label>
-          </div>
+            </div>
 
-          {localCfg.temporal_arb_enabled && (
-            <>
+            <div className="config-group">
+              <label className="config-label">Max Total Exposure</label>
+              <input
+                type="number"
+                className="config-input"
+                min="1"
+                step="1"
+                value={localCfg.max_total_exposure_usd}
+                onChange={num("max_total_exposure_usd")}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Risk group */}
+        <div className="config-section">
+          <div className="config-section-label">
+            <span className="config-section-dot" style={{ background: "var(--red)" }} />
+            Risk Limits
+          </div>
+          <div className="config-grid">
+            <div className="config-group">
+              <label className="config-label">Max Daily Loss (USD)</label>
+              <input
+                type="number"
+                className="config-input"
+                min="1"
+                step="1"
+                value={localCfg.max_daily_loss_usd}
+                onChange={num("max_daily_loss_usd")}
+              />
+            </div>
+
+            <div className="config-group">
+              <label className="config-label">Max Open Orders</label>
+              <input
+                type="number"
+                className="config-input"
+                min="1"
+                step="1"
+                value={localCfg.max_open_orders}
+                onChange={numInt("max_open_orders")}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Execution group */}
+        <div className="config-section">
+          <div className="config-section-label">
+            <span className="config-section-dot" style={{ background: "var(--purple)" }} />
+            Execution
+          </div>
+          <div className="config-grid config-grid--toggles">
+            <div className="config-group config-group--check">
+              <label className="config-label">
+                <input
+                  type="checkbox"
+                  checked={localCfg.use_maker_mode}
+                  onChange={bool("use_maker_mode")}
+                />
+                <span>Maker Mode</span>
+                <span className="config-hint">GTC orders · 0% fees</span>
+              </label>
+            </div>
+
+            <div className="config-group config-group--check">
+              <label className="config-label">
+                <input
+                  type="checkbox"
+                  checked={localCfg.temporal_arb_enabled}
+                  onChange={bool("temporal_arb_enabled")}
+                />
+                <span>Temporal Arb</span>
+                <span className="config-hint">Binance feed</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        {/* Temporal arb params */}
+        {localCfg.temporal_arb_enabled && (
+          <div className="config-section config-section--nested">
+            <div className="config-section-label">
+              <span className="config-section-dot" style={{ background: "var(--yellow)" }} />
+              Temporal Arb Parameters
+            </div>
+            <div className="config-grid">
               <div className="config-group">
-                <label className="config-label">Temporal Threshold (bps)</label>
+                <label className="config-label">Threshold (bps)</label>
                 <input
                   type="number"
                   className="config-input"
@@ -230,7 +276,7 @@ export function Controls({ controls }: Props) {
               </div>
 
               <div className="config-group">
-                <label className="config-label">Temporal Sensitivity (bps)</label>
+                <label className="config-label">Sensitivity (bps)</label>
                 <input
                   type="number"
                   className="config-input"
@@ -240,9 +286,9 @@ export function Controls({ controls }: Props) {
                   onChange={numInt("temporal_arb_sensitivity_bps")}
                 />
               </div>
-            </>
-          )}
-        </div>
+            </div>
+          </div>
+        )}
 
         <div className="config-footer">
           <button
@@ -255,6 +301,42 @@ export function Controls({ controls }: Props) {
           {saved && <span className="save-ok">Changes applied</span>}
         </div>
       </div>
+
+      {/* ── Per-strategy toggles ── */}
+      {strategies.length > 0 && (
+        <div className="controls-body controls-body--strategies">
+          <div className="config-section-label" style={{ marginBottom: 8 }}>
+            <span className="config-section-dot" style={{ background: "var(--green)" }} />
+            Strategies
+          </div>
+          <div className="strategy-list">
+            {strategies.map((s) => (
+              <div key={s.name} className="strategy-row">
+                <div className="strategy-row-left">
+                  <span className={`strategy-dot ${s.enabled ? "strategy-dot--on" : "strategy-dot--off"}`} />
+                  <span className="strategy-name">{s.name}</span>
+                </div>
+                <div className="strategy-row-right">
+                  <span className={`strategy-badge ${s.enabled ? "active" : "paused"}`}>
+                    {s.enabled ? "ON" : "OFF"}
+                  </span>
+                  <button
+                    className={`btn-strategy-toggle ${s.enabled ? "btn-pause" : "btn-resume"}`}
+                    onClick={() => handleStrategyToggle(s.name, s.enabled)}
+                    disabled={strategyBusy === s.name}
+                  >
+                    {strategyBusy === s.name
+                      ? "…"
+                      : s.enabled
+                      ? "Disable"
+                      : "Enable"}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </section>
   );
 }

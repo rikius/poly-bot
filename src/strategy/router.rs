@@ -134,12 +134,13 @@ impl StrategyRouter {
         self.strategies.read().unwrap().keys().cloned().collect()
     }
 
-    /// Returns (eval_count, intent_count) per strategy since last reset
+    /// Returns (eval_count, intent_count) per *enabled* strategy since last reset.
     pub fn evaluation_counts(&self) -> HashMap<String, (u64, u64)> {
         self.strategies
             .read()
             .unwrap()
             .iter()
+            .filter(|(_, reg)| reg.enabled && reg.strategy.is_enabled())
             .map(|(name, reg)| {
                 (
                     name.clone(),

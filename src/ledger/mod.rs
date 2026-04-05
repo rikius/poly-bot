@@ -13,6 +13,7 @@ pub use positions::{Fill, Position, Positions};
 
 use crate::websocket::types::{Side, TokenId};
 use rust_decimal::Decimal;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Authoritative portfolio state
@@ -27,6 +28,8 @@ pub struct Ledger {
     pub cash: CashBalance,
     /// Fill history (for audit/replay)
     fills: std::sync::RwLock<Vec<Fill>>,
+    /// Seen fill IDs — prevents double-counting on WebSocket reconnect
+    seen_fill_ids: std::sync::RwLock<HashSet<String>>,
 }
 
 impl Default for Ledger {
@@ -51,6 +54,7 @@ impl Ledger {
             positions: Positions::new(),
             cash: CashBalance::new(initial_cash),
             fills: std::sync::RwLock::new(Vec::new()),
+            seen_fill_ids: std::sync::RwLock::new(HashSet::new()),
         }
     }
 
@@ -59,7 +63,16 @@ impl Ledger {
     /// Updates: positions, cash, order state.
     /// Automatically resolves `expected_price` from the tracked order (if not
     /// already set) so that slippage is computed against the original limit price.
+    /// Duplicate fill IDs (e.g. from WebSocket reconnect replay) are silently ignored.
     pub fn process_fill(&self, mut fill: Fill) {
+        // 0. Deduplicate — Polymarket re-sends fills on WS reconnect.
+        {
+            let mut seen = self.seen_fill_ids.write().unwrap();
+            if !seen.insert(fill.fill_id.clone()) {
+                return;
+            }
+        }
+
         // 1. Resolve expected price from the tracked order when not explicitly set.
         //    This allows callers (e.g., the WebSocket user handler) to pass a bare
         //    fill and have slippage computed automatically.
@@ -164,6 +177,32 @@ impl Ledger {
         let position_notional = self.positions.total_notional();
         let order_notional = self.orders.total_reserved_notional();
         position_notional + order_notional
+    }
+
+    /// Apply a server-side cancellation for an order we believe is still open.
+    ///
+    /// Called by the background sync task when the exchange no longer has an order
+    /// that our ledger tracks as active.  Releases the reserved cash for the
+    /// unfilled portion and transitions the order to `Cancelled`.
+    ///
+    /// Returns `true` if the order was found, was still open, and was corrected.
+    pub fn apply_server_cancel(&self, exchange_order_id: &str) -> bool {
+        let order = match self.orders.get_by_order_id(&exchange_order_id.to_string()) {
+            Some(o) => o,
+            None => return false,
+        };
+
+        if !order.state.is_open() {
+            return false;
+        }
+
+        let reserved_amount = order.remaining_notional();
+        if reserved_amount > Decimal::ZERO {
+            self.cash.release(reserved_amount);
+        }
+
+        let _ = self.orders.transition(&order.local_id, OrderState::Cancelled);
+        true
     }
 
     /// Get count of open orders
